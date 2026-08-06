@@ -1,0 +1,133 @@
+[
+  {
+    "cabecTitulo": {
+      "nCodTitulo": 1001,
+      "cCodIntTitulo": "INT-1001",
+      "cNumTitulo": "NF-500",
+      "dDtEmissao": "01/07/2026",
+      "dDtVenc": "10/07/2026",
+      "dDtPagamento": "",
+      "nCodCliente": 555,
+      "cCPFCNPJCliente": "12.345.678/0001-90",
+      "nCodCC": 1,
+      "cStatus": "EMABERTO",
+      "cNatureza": "R",
+      "cTipo": "NF",
+      "cNumDocFiscal": "500",
+      "cCodCateg": "1.01.01",
+      "aCodCateg": [{"cCodCateg": "1.01.01", "nPerc": 100.0, "nValor": 1500.00}],
+      "cNumParcela": "001/001",
+      "nValorTitulo": 1500.00,
+      "observacao": "Venda de produtos"
+    },
+    "lancamentos": [],
+    "resumo": {
+      "cLiquidado": "N",
+      "nValPago": 0.0,
+      "nValAberto": 1500.00,
+      "nDesconto": 0.0,
+      "nJuros": 0.0,
+      "nMulta": 0.0,
+      "nValLiquido": 0.0
+    }
+  },
+  {
+    "cabecTitulo": {
+      "nCodTitulo": 1002,
+      "cCodIntTitulo": "INT-1002",
+      "cNumTitulo": "NF-501",
+      "dDtEmissao": "02/07/2026",
+      "dDtVenc": "15/07/2026",
+      "dDtPagamento": "14/07/2026",
+      "nCodCliente": 556,
+      "cCPFCNPJCliente": "98.765.432/0001-10",
+      "nCodCC": 1,
+      "cStatus": "LIQUIDADO",
+      "cNatureza": "R",
+      "cTipo": "NF",
+      "cNumDocFiscal": "501",
+      "cCodCateg": "1.01.01",
+      "aCodCateg": [{"cCodCateg": "1.01.01", "nPerc": 100.0, "nValor": 800.00}],
+      "cNumParcela": "001/001",
+      "nValorTitulo": 800.00,
+      "observacao": ""
+    },
+    "lancamentos": [],
+    "resumo": {
+      "cLiquidado": "S",
+      "nValPago": 800.00,
+      "nValAberto": 0.0,
+      "nDesconto": 0.0,
+      "nJuros": 0.0,
+      "nMulta": 0.0,
+      "nValLiquido": 800.00
+    }
+  },
+  {
+    "cabecTitulo": {
+      "nCodTitulo": 2001,
+      "cCodIntTitulo": "INT-2001",
+      "cNumTitulo": "FORN-90",
+      "dDtEmissao": "03/07/2026",
+      "dDtVenc": "20/07/2026",
+      "dDtPagamento": "",
+      "nCodCliente": 777,
+      "cCPFCNPJCliente": "11.222.333/0001-44",
+      "nCodCC": 2,
+      "cStatus": "AVENCER",
+      "cNatureza": "P",
+      "cTipo": "BOL",
+      "cNumDocFiscal": "90",
+      "cCodCateg": "2.01.03",
+      "aCodCateg": [{"cCodCateg": "2.01.03", "nPerc": 100.0, "nValor": 950.00}],
+      "cNumParcela": "001/001",
+      "nValorTitulo": 950.00,
+      "observacao": "Compra de insumos"
+    },
+    "lancamentos": [],
+    "resumo": {
+      "cLiquidado": "N",
+      "nValPago": 0.0,
+      "nValAberto": 950.00,
+      "nDesconto": 0.0,
+      "nJuros": 0.0,
+      "nMulta": 0.0,
+      "nValLiquido": 0.0
+    }
+  },
+  {
+    "cabecTitulo": {
+      "nCodTitulo": 2002,
+      "cCodIntTitulo": "INT-2002",
+      "cNumTitulo": "FORN-91",
+      "dDtEmissao": "05/07/2026",
+      "dDtVenc": "05/07/2026",
+      "dDtPagamento": "",
+      "nCodCliente": 777,
+      "cCPFCNPJCliente": "11.222.333/0001-44",
+      "nCodCC": 2,
+      "cStatus": "ATRASADO",
+      "cNatureza": "P",
+      "cTipo": "BOL",
+      "cNumDocFiscal": "91",
+      "cCodCateg": "2.01.05",
+      "aCodCateg": [
+        {"cCodCateg": "2.01.05", "nPerc": 60.0, "nValor": 180.00},
+        {"cCodCateg": "2.01.06", "nPerc": 40.0, "nValor": 120.00}
+      ],
+      "cNumParcela": "001/001",
+      "nValorTitulo": 300.00,
+      "observacao": ""
+    },
+    "lancamentos": [],
+    "resumo": {
+      "cLiquidado": "N",
+      "nValPago": 0.0,
+      "nValAberto": 320.00,
+      "nDesconto": 0.0,
+      "nJuros": 20.0,
+      "nMulta": 0.0,
+      "nValLiquido": 0.0
+    }
+  }
+]
