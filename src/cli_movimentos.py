@@ -1,4 +1,12 @@
-"""CLI: orquestra busca de títulos na Omie, enriquecimento e geração do relatório Excel."""
+"""CLI: mesma orquestração de `cli.py` (enriquecimento + relatório Excel), mas
+buscando os dados via `financas/mf` (ListarMovimentos) em vez de
+`financas/pesquisartitulos` (PesquisarLancamentos) — veja `src/movimentos.py`
+para as diferenças entre as duas fontes.
+
+Reaproveita `report_builder`/`excel_writer`/`enrichment` sem nenhuma alteração:
+`movimentos.buscar_movimentos` já adapta cada item para o mesmo shape
+`{"cabecTitulo": ..., "resumo": ...}` que essas funções esperam.
+"""
 from __future__ import annotations
 
 import argparse
@@ -12,14 +20,13 @@ from . import report_builder
 from .config import ConfigError, carregar_config
 from .enrichment import build_categoria_map, build_cliente_map, build_conta_corrente_map
 from .excel_writer import escrever_relatorio
+from .movimentos import LIMITE_REGISTROS_POR_PAGINA, buscar_movimentos, contar_movimentos
 from .omie_client import OmieAPIError, OmieClient
-from .titulos import LIMITE_REGISTROS_POR_PAGINA, STATUS_VALIDOS, buscar_titulos, contar_titulos
 
-# A partir deste volume de títulos, avisamos que a execução deve demorar bastante
-# (montagem das linhas e chamadas à API escalam com o volume de títulos).
+# A partir deste volume de movimentos, avisamos que a execução deve demorar bastante.
 _LIMIAR_AVISO_VOLUME = 1000
 
-logger = logging.getLogger("cli")
+logger = logging.getLogger("cli_movimentos")
 
 _DATA_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 
@@ -36,16 +43,19 @@ def _validar_data(valor: str) -> str:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        prog="relatorio-financeiro-omie",
-        description="Gera relatório financeiro (contas a pagar e a receber) a partir da API da Omie.",
+        prog="relatorio-financeiro-omie-movimentos",
+        description=(
+            "Gera relatório financeiro (contas a pagar e a receber) a partir da API da "
+            "Omie, usando ListarMovimentos (financas/mf) em vez de PesquisarLancamentos."
+        ),
     )
     p.add_argument(
         "--data-inicio", default=None, type=_validar_data,
-        help="Data inicial do filtro (dd/mm/aaaa). Se omitida junto com --data-fim, busca TODOS os títulos já lançados.",
+        help="Data inicial do filtro (dd/mm/aaaa). Se omitida junto com --data-fim, busca TODOS os movimentos já lançados.",
     )
     p.add_argument(
         "--data-fim", default=None, type=_validar_data,
-        help="Data final do filtro (dd/mm/aaaa). Se omitida junto com --data-inicio, busca TODOS os títulos já lançados.",
+        help="Data final do filtro (dd/mm/aaaa). Se omitida junto com --data-inicio, busca TODOS os movimentos já lançados.",
     )
     p.add_argument(
         "--filtro-data",
@@ -57,9 +67,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--natureza",
         choices=("P", "R", "PR"),
         default="PR",
-        help="P=somente a pagar, R=somente a receber, PR=ambos (padrão)",
+        help="P=somente a pagar, R=somente a receber, PR=ambos numa única busca (padrão)",
     )
-    p.add_argument("--status", choices=STATUS_VALIDOS, default=None, help="Filtrar por status do título (padrão: todos)")
+    p.add_argument(
+        "--status", default=None,
+        help=(
+            "Filtrar por status do movimento (padrão: todos). O vocabulário de status "
+            "do ListarMovimentos difere do PesquisarLancamentos (ex.: \"A VENCER\", "
+            "\"PAGO\", \"RECEBIDO\", \"CANCELADO\", \"ATRASADO\") — não é validado "
+            "localmente, passe o valor exato aceito pela sua conta."
+        ),
+    )
     p.add_argument("--output", default=None, help="Caminho do arquivo .xlsx de saída")
     p.add_argument(
         "--registros-por-pagina", type=int, default=LIMITE_REGISTROS_POR_PAGINA,
@@ -78,13 +96,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def _naturezas(codigo: str) -> tuple[str, ...]:
-    return ("P", "R") if codigo == "PR" else (codigo,)
-
-
 def _tag_periodo(args: argparse.Namespace) -> str:
     if not args.data_inicio and not args.data_fim:
-        return "todos_titulos_" + datetime.now().strftime("%Y%m%d-%H%M%S")
+        return "todos_movimentos_" + datetime.now().strftime("%Y%m%d-%H%M%S")
     inicio = args.data_inicio.replace("/", "-") if args.data_inicio else "inicio"
     fim = args.data_fim.replace("/", "-") if args.data_fim else "fim"
     return f"{inicio}_a_{fim}"
@@ -104,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Erro de configuração: {exc}", file=sys.stderr)
         return 1
 
-    output = args.output or os.path.join("output", f"relatorio_financeiro_{_tag_periodo(args)}.xlsx")
+    output = args.output or os.path.join("output", f"relatorio_financeiro_movimentos_{_tag_periodo(args)}.xlsx")
     os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
 
     client = OmieClient(
@@ -116,44 +130,44 @@ def main(argv: list[str] | None = None) -> int:
 
     usar_cache_disco = not args.sem_cache_disco
     ttl_segundos = args.cache_ttl_horas * 3600
+    natureza = None if args.natureza == "PR" else args.natureza
 
     try:
-        naturezas = _naturezas(args.natureza)
-        logger.info("Estimando volume de títulos antes de buscar...")
-        contagem = contar_titulos(
+        logger.info("Estimando volume de movimentos antes de buscar...")
+        total_estimado = contar_movimentos(
             client, data_inicio=args.data_inicio, data_fim=args.data_fim,
-            naturezas=naturezas, filtro_data=args.filtro_data, status=args.status,
+            natureza=natureza, filtro_data=args.filtro_data, status=args.status,
         )
-        total_estimado = sum(contagem.values())
-        logger.info("Volume estimado: %s (total: %d)", contagem, total_estimado)
+        logger.info("Volume estimado: %d movimentos", total_estimado)
 
         if total_estimado > _LIMIAR_AVISO_VOLUME:
             logger.warning(
-                "%d títulos estimados — bem acima do usual. A geração do relatório pode levar bastante "
-                "tempo em contas com histórico grande. Use Ctrl+C para cancelar se não era essa a intenção.",
+                "%d movimentos estimados — bem acima do usual. A geração do relatório pode "
+                "levar bastante tempo em contas com histórico grande. Use Ctrl+C para "
+                "cancelar se não era essa a intenção.",
                 total_estimado,
             )
         elif not args.data_inicio and not args.data_fim:
-            logger.warning("Nenhum filtro de data informado — buscando TODOS os títulos já lançados na conta.")
+            logger.warning("Nenhum filtro de data informado — buscando TODOS os movimentos já lançados na conta.")
 
         logger.info(
-            "Buscando títulos (%s a %s, filtro por %s, natureza=%s, status=%s)...",
+            "Buscando movimentos (%s a %s, filtro por %s, natureza=%s, status=%s)...",
             args.data_inicio or "sem limite inicial", args.data_fim or "sem limite final", args.filtro_data,
             args.natureza, args.status or "TODOS",
         )
-        titulos_raw = buscar_titulos(
+        titulos_raw = buscar_movimentos(
             client,
             data_inicio=args.data_inicio,
             data_fim=args.data_fim,
-            naturezas=naturezas,
+            natureza=natureza,
             filtro_data=args.filtro_data,
             status=args.status,
             registros_por_pagina=args.registros_por_pagina,
         )
-        logger.info("Total de títulos encontrados: %d", len(titulos_raw))
+        logger.info("Total de movimentos encontrados: %d", len(titulos_raw))
 
         if not titulos_raw:
-            logger.warning("Nenhum título encontrado para os filtros informados. Gerando relatório vazio.")
+            logger.warning("Nenhum movimento encontrado para os filtros informados. Gerando relatório vazio.")
 
         logger.info("Carregando categorias, contas correntes e clientes/fornecedores para enriquecimento...")
         categoria_map = build_categoria_map(client, usar_cache=usar_cache_disco, ttl_segundos=ttl_segundos)

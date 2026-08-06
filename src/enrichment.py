@@ -9,10 +9,7 @@ da aplicação para evitar requisições redundantes").
 from __future__ import annotations
 
 import logging
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Iterable
+from typing import Any
 
 from . import local_cache
 from .omie_client import OmieClient
@@ -51,16 +48,35 @@ def _listar_paginado(
 
 def build_categoria_map(
     client: OmieClient, usar_cache: bool = True, ttl_segundos: float = TTL_PADRAO_SEGUNDOS
-) -> dict[str, str]:
-    """Retorna {codigo_categoria: descricao}, usando cache em disco quando disponível."""
+) -> dict[str, dict[str, str]]:
+    """Retorna {codigo_categoria: {descricao, categoria_superior, codigo_dre}}, usando
+    cache em disco quando disponível.
+
+    `categoria_superior` é o código do grupo da categoria (campo documentado pela
+    Omie) e `codigo_dre` é o código de vínculo da categoria no DRE — ambos usados
+    para resolver as colunas "Grupo" e "DRE" no layout padrão da aba Geral.
+    """
     if usar_cache:
         cache = local_cache.carregar_com_ttl("categorias", ttl_segundos)
         if cache is not None:
-            logger.info("Categorias carregadas do cache local: %d", len(cache))
-            return cache
+            if all(isinstance(v, dict) for v in cache.values()):
+                logger.info("Categorias carregadas do cache local: %d", len(cache))
+                return cache
+            logger.info(
+                "Cache local de categorias está em formato antigo (versão anterior do "
+                "projeto) — reconsultando a API para atualizá-lo."
+            )
 
     categorias = _listar_paginado(client, "geral/categorias", "ListarCategorias", "categoria_cadastro")
-    mapa = {c["codigo"]: c.get("descricao", c["codigo"]) for c in categorias if c.get("codigo")}
+    mapa = {
+        c["codigo"]: {
+            "descricao": c.get("descricao", c["codigo"]),
+            "categoria_superior": c.get("categoria_superior") or "",
+            "codigo_dre": c.get("codigo_dre") or "",
+        }
+        for c in categorias
+        if c.get("codigo")
+    }
     logger.info("Categorias carregadas da API: %d", len(mapa))
 
     if usar_cache:
@@ -91,122 +107,45 @@ def build_conta_corrente_map(
     return mapa
 
 
-class ClienteFornecedorCache:
-    """Busca (com cache em memória + disco) os dados cadastrais de clientes/fornecedores.
+def build_cliente_map(
+    client: OmieClient,
+    usar_cache: bool = True,
+    ttl_segundos: float = TTL_PADRAO_SEGUNDOS,
+    registros_por_pagina: int = 100,
+) -> dict[int, dict[str, str]]:
+    """Retorna {codigo_cliente_omie: {razao_social, nome_fantasia, cnpj_cpf}},
+    usando cache em disco quando disponível.
 
-    Usa ConsultarCliente por código, em vez de baixar a base inteira de clientes,
-    para escalar bem mesmo em contas com cadastros muito grandes — apenas os
-    códigos que efetivamente aparecem nos títulos do período são consultados.
-
-    Suporta pré-carregamento em paralelo (`prefetch`) — a Omie permite até 4
-    requisições simultâneas por IP + App Key + Método, e a latência de rede
-    (não o rate limit) costuma ser o gargalo real dessa etapa.
+    Usa ListarClientes (listagem paginada de todo o cadastro) em vez de uma
+    chamada ConsultarCliente por código de cliente distinto encontrado nos
+    títulos. Para contas com muitos clientes/fornecedores diferentes no
+    período, isso reduz drasticamente o número de chamadas à API — de uma
+    por cliente distinto para uma a cada `registros_por_pagina` clientes
+    cadastrados no total.
     """
+    if usar_cache:
+        cache = local_cache.carregar_com_ttl("clientes", ttl_segundos)
+        if cache is not None:
+            # Chaves JSON são sempre string; nCodCliente é usado como int no restante do código.
+            mapa_convertido = {int(k): v for k, v in cache.items()}
+            logger.info("Clientes/fornecedores carregados do cache local: %d", len(mapa_convertido))
+            return mapa_convertido
 
-    MODULO = "geral/clientes"
-    CHAMADA = "ConsultarCliente"
-    NOME_CACHE = "clientes"
+    clientes = _listar_paginado(
+        client, "geral/clientes", "ListarClientes", "clientes_cadastro", registros_por_pagina
+    )
+    mapa = {
+        c["codigo_cliente_omie"]: {
+            "razao_social": c.get("razao_social", ""),
+            "nome_fantasia": c.get("nome_fantasia", ""),
+            "cnpj_cpf": c.get("cnpj_cpf", ""),
+        }
+        for c in clientes
+        if c.get("codigo_cliente_omie") is not None
+    }
+    logger.info("Clientes/fornecedores carregados da API: %d", len(mapa))
 
-    def __init__(
-        self,
-        client: OmieClient,
-        max_workers: int = 4,
-        usar_cache_disco: bool = True,
-        ttl_segundos: float = TTL_PADRAO_SEGUNDOS,
-    ):
-        self._client = client
-        self._max_workers = max(1, max_workers)
-        self._usar_cache_disco = usar_cache_disco
-        self._ttl_segundos = ttl_segundos
-        self._lock = threading.Lock()
-        self._cache: dict[int, dict[str, Any]] = {}
-        self._sujo = False
-        self._consultas_rede = 0
+    if usar_cache:
+        local_cache.salvar_com_ttl("clientes", {str(k): v for k, v in mapa.items()})
 
-        if usar_cache_disco:
-            self._carregar_disco()
-
-    def _carregar_disco(self) -> None:
-        bruto = local_cache.carregar(self.NOME_CACHE)
-        agora = time.time()
-        validos = 0
-        for cod_str, entrada in bruto.items():
-            if agora - entrada.get("_ts", 0) <= self._ttl_segundos:
-                self._cache[int(cod_str)] = entrada
-                validos += 1
-        if validos:
-            logger.info(
-                "Cache local de clientes/fornecedores: %d registros válidos (TTL %.0fh)",
-                validos, self._ttl_segundos / 3600,
-            )
-
-    def _consultar(self, codigo_cliente: int) -> dict[str, Any]:
-        try:
-            resp = self._client.call(self.MODULO, self.CHAMADA, {"codigo_cliente_omie": codigo_cliente})
-            dados = {
-                "razao_social": resp.get("razao_social", ""),
-                "nome_fantasia": resp.get("nome_fantasia", ""),
-                "cnpj_cpf": resp.get("cnpj_cpf", ""),
-            }
-        except Exception as exc:  # noqa: BLE001 - não deve interromper o relatório
-            logger.warning("Falha ao consultar cliente/fornecedor %s: %s", codigo_cliente, exc)
-            dados = {"razao_social": f"[não encontrado: {codigo_cliente}]", "nome_fantasia": "", "cnpj_cpf": ""}
-
-        dados["_ts"] = time.time()
-        with self._lock:
-            self._consultas_rede += 1
-        return dados
-
-    def get(self, codigo_cliente: int | None) -> dict[str, Any]:
-        if not codigo_cliente:
-            return {"razao_social": "", "nome_fantasia": "", "cnpj_cpf": ""}
-
-        with self._lock:
-            cached = self._cache.get(codigo_cliente)
-        if cached is not None:
-            return cached
-
-        dados = self._consultar(codigo_cliente)
-        with self._lock:
-            self._cache[codigo_cliente] = dados
-            self._sujo = True
-        return dados
-
-    def prefetch(self, codigos: Iterable[int | None]) -> None:
-        """Consulta em paralelo (até `max_workers` simultâneas) todos os códigos
-        ainda não presentes no cache. Chame antes de montar as linhas do relatório
-        para evitar consultas sequenciais bloqueantes uma a uma."""
-        with self._lock:
-            pendentes = sorted({c for c in codigos if c and c not in self._cache})
-        if not pendentes:
-            return
-
-        logger.info(
-            "Consultando %d clientes/fornecedores novos (até %d em paralelo)...",
-            len(pendentes), self._max_workers,
-        )
-        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
-            futuros = {executor.submit(self._consultar, cod): cod for cod in pendentes}
-            for futuro in as_completed(futuros):
-                cod = futuros[futuro]
-                dados = futuro.result()
-                with self._lock:
-                    self._cache[cod] = dados
-                    self._sujo = True
-
-    def persistir(self) -> None:
-        """Grava o cache em disco (só reescreve se houve consultas novas nesta execução)."""
-        if not self._usar_cache_disco or not self._sujo:
-            return
-        with self._lock:
-            bruto = {str(cod): dados for cod, dados in self._cache.items()}
-        local_cache.salvar(self.NOME_CACHE, bruto)
-        self._sujo = False
-
-    @property
-    def total_em_cache(self) -> int:
-        return len(self._cache)
-
-    @property
-    def total_consultas_rede(self) -> int:
-        return self._consultas_rede
+    return mapa

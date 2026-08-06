@@ -136,8 +136,7 @@ class OmieClient:
                 raise OmieAPIError(
                     f"Chamada '{chamada}' bloqueada pela Omie por excesso de requisições (HTTP 425). "
                     "Isso ocorre após 10 falhas consecutivas para o mesmo método e dura ~30 minutos. "
-                    "Aguarde antes de tentar novamente; considere reduzir --max-workers-clientes "
-                    "ou OMIE_MAX_REQ_POR_SEGUNDO.",
+                    "Aguarde antes de tentar novamente; considere reduzir OMIE_MAX_REQ_POR_SEGUNDO.",
                     fault_code=fault_code,
                     http_status=425,
                 )

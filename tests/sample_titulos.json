@@ -18,6 +18,7 @@
       "aCodCateg": [{"cCodCateg": "1.01.01", "nPerc": 100.0, "nValor": 1500.00}],
       "cNumParcela": "001/001",
       "nValorTitulo": 1500.00,
+      "dDtRegistro": "28/06/2026",
       "observacao": "Venda de produtos"
     },
     "lancamentos": [],
@@ -117,6 +118,13 @@
       ],
       "cNumParcela": "001/001",
       "nValorTitulo": 300.00,
+      "dDtRegistro": "04/07/2026",
+      "nValorPIS": 30.00,
+      "nValorCOFINS": 50.00,
+      "nValorCSLL": 20.00,
+      "nValorIR": 100.00,
+      "nValorISS": 10.00,
+      "nValorINSS": 0.00,
       "observacao": ""
     },
     "lancamentos": [],

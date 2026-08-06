@@ -11,6 +11,9 @@ import json
 import os
 import sys
 import tempfile
+from datetime import date
+
+import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -18,23 +21,20 @@ from src import report_builder  # noqa: E402
 from src.excel_writer import escrever_relatorio  # noqa: E402
 
 CATEGORIA_MAP = {
-    "1.01.01": "Vendas de Produtos",
-    "2.01.03": "Insumos",
-    "2.01.05": "Despesas Gerais",
-    "2.01.06": "Despesas Administrativas",
+    "1.01": {"descricao": "Receita Operacional", "categoria_superior": "", "codigo_dre": ""},
+    "1.01.01": {"descricao": "Vendas de Produtos", "categoria_superior": "1.01", "codigo_dre": "3.01.01"},
+    "2.01": {"descricao": "Despesas Operacionais", "categoria_superior": "", "codigo_dre": ""},
+    "2.01.03": {"descricao": "Insumos", "categoria_superior": "2.01", "codigo_dre": "4.01.03"},
+    "2.01.05": {"descricao": "Despesas Gerais", "categoria_superior": "2.01", "codigo_dre": ""},
+    "2.01.06": {"descricao": "Despesas Administrativas", "categoria_superior": "2.01", "codigo_dre": "4.01.06"},
 }
 CC_MAP = {1: "Banco X - Conta Corrente", 2: "Banco Y - Conta Corrente"}
 
-_CLIENTES = {
+CLIENTE_MAP = {
     555: {"razao_social": "Cliente Alfa Ltda", "nome_fantasia": "Alfa", "cnpj_cpf": "12.345.678/0001-90"},
     556: {"razao_social": "Cliente Beta ME", "nome_fantasia": "Beta", "cnpj_cpf": "98.765.432/0001-10"},
     777: {"razao_social": "Fornecedor Gama SA", "nome_fantasia": "Gama", "cnpj_cpf": "11.222.333/0001-44"},
 }
-
-
-class ClienteCacheFalso:
-    def get(self, codigo):
-        return _CLIENTES.get(codigo, {"razao_social": "", "nome_fantasia": "", "cnpj_cpf": ""})
 
 
 def _assert_quase_igual(a: float, b: float, msg: str) -> None:
@@ -46,40 +46,22 @@ def main() -> None:
     with open(caminho_amostra, encoding="utf-8") as f:
         titulos_raw = json.load(f)
 
-    linhas = report_builder.montar_linhas(titulos_raw, CATEGORIA_MAP, CC_MAP, ClienteCacheFalso())
-    # 4 títulos, mas o título 2002 tem rateio em 2 categorias -> 5 linhas no total.
-    assert len(linhas) == 5, f"esperado 5 linhas, obtido {len(linhas)}"
-    assert linhas[0]["Cliente/Fornecedor"] == "Cliente Alfa Ltda"
+    linhas = report_builder.montar_linhas(titulos_raw, CATEGORIA_MAP, CC_MAP, CLIENTE_MAP)
+    # 4 títulos -> 4 linhas (sem rateio: cada título usa só cCodCateg, categoria única).
+    assert len(linhas) == 4, f"esperado 4 linhas, obtido {len(linhas)}"
+    assert linhas[0]["Cliente/Fornecedor"] == "Alfa"
     assert linhas[0]["Categoria"] == "Vendas de Produtos"
     assert linhas[0]["Conta Corrente"] == "Banco X - Conta Corrente"
     print("OK: montar_linhas")
 
-    linhas_rateio = [l for l in linhas if l["Código Título"] == 2002]
-    assert len(linhas_rateio) == 2, "título 2002 deveria gerar 2 linhas (rateio de categoria)"
-    linhas_rateio = sorted(linhas_rateio, key=lambda l: l["Categoria"])
-
-    l_admin, l_gerais = linhas_rateio
-    assert l_admin["Categoria"] == "Despesas Administrativas"
-    _assert_quase_igual(l_admin["% Categoria"], 40.0, "% Categoria (Despesas Administrativas)")
-    _assert_quase_igual(l_admin["Valor Título"], 120.0, "Valor Título rateado (Despesas Administrativas)")
-    _assert_quase_igual(l_admin["Valor Título (Total)"], 300.0, "Valor Título (Total)")
-    _assert_quase_igual(l_admin["Valor Aberto"], 320.0 * 0.4, "Valor Aberto rateado (Despesas Administrativas)")
-    _assert_quase_igual(l_admin["Juros"], 20.0 * 0.4, "Juros rateado (Despesas Administrativas)")
-
-    assert l_gerais["Categoria"] == "Despesas Gerais"
-    _assert_quase_igual(l_gerais["% Categoria"], 60.0, "% Categoria (Despesas Gerais)")
-    _assert_quase_igual(l_gerais["Valor Título"], 180.0, "Valor Título rateado (Despesas Gerais)")
-    _assert_quase_igual(l_gerais["Valor Aberto"], 320.0 * 0.6, "Valor Aberto rateado (Despesas Gerais)")
-    _assert_quase_igual(l_gerais["Juros"], 20.0 * 0.6, "Juros rateado (Despesas Gerais)")
-
-    # A soma das linhas rateadas deve reconciliar exatamente com os totais originais do título.
-    _assert_quase_igual(
-        sum(l["Valor Título"] for l in linhas_rateio), 300.0, "soma Valor Título rateado == Valor Título original"
-    )
-    _assert_quase_igual(
-        sum(l["Valor Aberto"] for l in linhas_rateio), 320.0, "soma Valor Aberto rateado == Valor Aberto original"
-    )
-    print("OK: rateio de categoria (explosão do título 2002 em 2 linhas)")
+    # Título 2002 tem aCodCateg (rateio) na amostra bruta, mas isso é ignorado:
+    # o valor cheio do título fica sob a categoria única de cCodCateg.
+    linha_2002 = next(l for l in linhas if l["Código Título"] == 2002)
+    assert linha_2002["Categoria"] == "Despesas Gerais"
+    _assert_quase_igual(linha_2002["Valor Título"], 300.0, "Valor Título (cheio, sem rateio)")
+    _assert_quase_igual(linha_2002["Valor Aberto"], 320.0, "Valor Aberto (cheio, sem rateio)")
+    _assert_quase_igual(linha_2002["Juros"], 20.0, "Juros (cheio, sem rateio)")
+    print("OK: aCodCateg da amostra bruta é ignorado (rateio removido)")
 
     resumo = report_builder.montar_resumo(linhas)
     _assert_quase_igual(resumo["Total a Receber (Valor Título)"], 2300.0, "Total a Receber (Valor Título)")
@@ -98,10 +80,10 @@ def main() -> None:
     print("OK: montar_por_status")
 
     df_categoria = report_builder.montar_por_categoria(linhas)
-    assert len(df_categoria) == 4, "esperado 4 categorias distintas (rateio adiciona Despesas Administrativas)"
-    linha_admin = df_categoria[df_categoria["Categoria"] == "Despesas Administrativas"].iloc[0]
-    assert linha_admin["Quantidade"] == 1, "rateio não deve inflar a contagem de títulos distintos"
-    _assert_quase_igual(linha_admin["Valor Título"], 120.0, "Valor Título agregado (Despesas Administrativas)")
+    assert len(df_categoria) == 3, "esperado 3 categorias distintas (Vendas de Produtos, Insumos, Despesas Gerais)"
+    linha_gerais = df_categoria[df_categoria["Categoria"] == "Despesas Gerais"].iloc[0]
+    assert linha_gerais["Quantidade"] == 1
+    _assert_quase_igual(linha_gerais["Valor Título"], 300.0, "Valor Título agregado (Despesas Gerais)")
     print("OK: montar_por_categoria")
 
     df_cliente = report_builder.montar_por_cliente(linhas)
@@ -112,12 +94,57 @@ def main() -> None:
     assert list(df_fluxo["Mês"]) == ["2026-07"]
     print("OK: montar_fluxo_mensal")
 
-    df_geral = report_builder.montar_geral(linhas)
-    assert len(df_geral) == 5, "5 linhas (título 2002 rateado em 2), ordenadas por vencimento"
-    assert list(df_geral["Data Vencimento"]) == [
-        "05/07/2026", "05/07/2026", "10/07/2026", "15/07/2026", "20/07/2026",
+    df_geral = report_builder.montar_geral(
+        titulos_raw, CATEGORIA_MAP, CC_MAP, CLIENTE_MAP, hoje=date(2026, 7, 12)
+    )
+    colunas_esperadas = [
+        "x", "Tipo", "Grupo", "Categoria", "Observação da Conta",
+        "Data de Registro (completa)", "Data de Emissão (completa)", "NC/Nfe",
+        "Data de Vencimento (completa)", "Situação do Vencimento",
+        "Valor da Conta", "Pago ou Recebido", "A Pagar ou Receber",
+        "Conta Corrente", "Cliente ou Fornecedor (Nome Fantasia)",
+        "Observação do Pagto ou Recbto", "Data de Pagto",
+        "COFINS Retido", "CSLL Retido", "INSS Retido", "IR Retido", "ISS Retido", "PIS Retido",
+        "Desconto", "Juros", "DRE", "cod.fcx",
     ]
-    print("OK: montar_geral")
+    assert list(df_geral.columns) == colunas_esperadas, "colunas devem seguir o layout do modelo bdContas"
+    assert len(df_geral) == 4, "4 linhas (uma por título, sem rateio), ordenadas por vencimento"
+
+    assert list(df_geral["Data de Vencimento (completa)"]) == [
+        date(2026, 7, 5), date(2026, 7, 10), date(2026, 7, 15), date(2026, 7, 20),
+    ]
+    assert list(df_geral["Tipo"]) == [
+        "2. Contas a Pagar", "1. Contas a Receber", "1. Contas a Receber", "2. Contas a Pagar",
+    ]
+    assert list(df_geral["Grupo"]) == [
+        "Despesas Operacionais", "Receita Operacional", "Receita Operacional", "Despesas Operacionais",
+    ]
+    assert list(df_geral["DRE"]) == ["Não", "Sim", "Sim", "Sim"], (
+        "2.01.05 (título 2002) não tem codigo_dre (Não); as demais categorias têm (Sim)"
+    )
+    assert list(df_geral["Situação do Vencimento"]) == [
+        "Vencido até 30 dias", "Vencido até 30 dias", "Recebido", "A vencer até 30 dias",
+    ]
+    print("OK: montar_geral (colunas, Tipo, Grupo, DRE, Situação do Vencimento)")
+
+    # Retenções (cabecTitulo) do título 2002 (linha 0) ficam com o valor cheio,
+    # sem proporção de rateio — o array aCodCateg da amostra bruta é ignorado.
+    _assert_quase_igual(df_geral.iloc[0]["IR Retido"], 100.0, "IR Retido (cheio, sem rateio)")
+    _assert_quase_igual(df_geral.iloc[0]["PIS Retido"], 30.0, "PIS Retido (cheio, sem rateio)")
+    _assert_quase_igual(df_geral.iloc[0]["COFINS Retido"], 50.0, "COFINS Retido (cheio, sem rateio)")
+    print("OK: montar_geral (retenções de impostos, sem proporção de rateio)")
+
+    # Datas reais (não texto) — necessário para o formato dd/mm/yyyy funcionar no Excel.
+    assert df_geral.iloc[0]["Data de Registro (completa)"] == date(2026, 7, 4)  # título 2002
+    assert df_geral.iloc[1]["Data de Registro (completa)"] == date(2026, 6, 28)  # título 1001
+    assert pd.isna(df_geral.iloc[2]["Data de Registro (completa)"]), "título sem dDtRegistro deve virar NaT/None"
+    assert df_geral.iloc[1]["Cliente ou Fornecedor (Nome Fantasia)"] == "Alfa"
+
+    # Colunas sem fonte de dados na API ficam em branco, mas presentes na estrutura.
+    assert set(df_geral["x"]) == {""}
+    assert set(df_geral["Observação do Pagto ou Recbto"]) == {""}
+    assert set(df_geral["cod.fcx"]) == {""}
+    print("OK: montar_geral (datas reais e colunas sem fonte na API)")
 
     df_pagar = _filtrar(linhas, "Pagar")
     df_receber = _filtrar(linhas, "Receber")

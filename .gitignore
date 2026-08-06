@@ -7,3 +7,8 @@ output/*.xlsx
 output/*.csv
 debug_raw/*.json
 .cache/
+
+# Planilhas-modelo com dados financeiros reais de clientes (ex.: centria.xlsb)
+# usadas como referência de layout — não devem ser versionadas.
+*.xlsb
+*.csv

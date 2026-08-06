@@ -1,0 +1,115 @@
+{
+  "nPagina": 1,
+  "nTotPaginas": 1,
+  "nRegistros": 4,
+  "nTotRegistros": 4,
+  "movimentos": [
+    {
+      "detalhes": {
+        "nCodTitulo": 5001,
+        "cCodIntTitulo": "INT-5001",
+        "cNumTitulo": "NF-900",
+        "dDtEmissao": "01/07/2026",
+        "dDtVenc": "10/07/2026",
+        "dDtPagamento": "10/07/2026",
+        "dDtRegistro": "01/07/2026",
+        "nCodCliente": 777,
+        "cCPFCNPJCliente": "11.222.333/0001-44",
+        "nCodCC": 2,
+        "cStatus": "PAGO",
+        "cNatureza": "P",
+        "cTipo": "NFS",
+        "cNumDocFiscal": "900",
+        "cCodCateg": "2.01.05",
+        "cGrupo": "CONTA_A_PAGAR",
+        "cNumParcela": "001/001",
+        "nValorTitulo": 1000.00,
+        "observacao": "Movimento de teste rateado e já pago"
+      },
+      "categorias": [
+        {"cCodCateg": "2.01.05", "nDistrPercentual": 70.0, "nDistrValor": 700.00},
+        {"cCodCateg": "2.01.06", "nDistrPercentual": 30.0, "nDistrValor": 300.00}
+      ],
+      "resumo": {
+        "cLiquidado": "S",
+        "nValPago": 1000.00,
+        "nValAberto": 0.0,
+        "nDesconto": 0.0,
+        "nJuros": 0.0,
+        "nMulta": 0.0,
+        "nValLiquido": 1000.00
+      }
+    },
+    {
+      "detalhes": {
+        "nCodTitulo": 5001,
+        "cCodIntTitulo": "INT-5001",
+        "cNumTitulo": "NF-900",
+        "dDtVenc": "10/07/2026",
+        "dDtPagamento": "10/07/2026",
+        "nCodCliente": 777,
+        "nCodCC": 2,
+        "cStatus": "PAGO",
+        "cNatureza": "P",
+        "cGrupo": "CONTA_CORRENTE_PAG",
+        "nValorTitulo": 1000.00
+      },
+      "resumo": {
+        "cLiquidado": "S",
+        "nValPago": 1000.00,
+        "nValAberto": 0.0,
+        "nDesconto": 0.0,
+        "nJuros": 0.0,
+        "nMulta": 0.0,
+        "nValLiquido": 1000.00
+      }
+    },
+    {
+      "detalhes": {
+        "nCodTitulo": 5002,
+        "cCodIntTitulo": "INT-5002",
+        "cNumTitulo": "NF-800",
+        "dDtEmissao": "03/07/2026",
+        "dDtVenc": "18/07/2026",
+        "dDtPagamento": "",
+        "dDtRegistro": "03/07/2026",
+        "nCodCliente": 555,
+        "cCPFCNPJCliente": "12.345.678/0001-90",
+        "nCodCC": 1,
+        "cStatus": "A VENCER",
+        "cNatureza": "R",
+        "cTipo": "NF",
+        "cNumDocFiscal": "800",
+        "cCodCateg": "1.01.01",
+        "cGrupo": "CONTA_A_RECEBER",
+        "cNumParcela": "001/001",
+        "nValorTitulo": 500.00,
+        "observacao": ""
+      },
+      "resumo": {
+        "cLiquidado": "N",
+        "nValPago": 0.0,
+        "nValAberto": 500.00,
+        "nDesconto": 0.0,
+        "nJuros": 0.0,
+        "nMulta": 0.0,
+        "nValLiquido": 0.0
+      }
+    },
+    {
+      "detalhes": {
+        "nCodTitulo": 7001,
+        "nCodCliente": 555,
+        "cStatus": "PREVISAO",
+        "cNatureza": "R",
+        "cCodCateg": "1.01.01",
+        "cGrupo": "PREVISAO_CONTRATO",
+        "dDtVenc": "25/07/2026",
+        "nValorTitulo": 9999.00
+      },
+      "resumo": {
+        "nValLiquido": 9500.00
+      }
+    }
+  ]
+}
