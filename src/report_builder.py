@@ -2,6 +2,7 @@
 relatório e agregações prontas para exportação."""
 from __future__ import annotations
 
+import html
 from datetime import date, datetime
 from typing import Any, Iterator
 
@@ -15,6 +16,26 @@ def _num(valor: Any) -> float:
         return float(valor)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _num_retido(cabec: dict[str, Any], campo_valor: str, campo_flag: str) -> float:
+    """Valor de uma retenção (COFINS/CSLL/IR/ISS/PIS), zerado quando o flag de
+    retenção correspondente (`cRetXXX`) é explicitamente "N": confirmado contra
+    dados reais que `nValorXXX` pode vir preenchido (um valor calculado/de
+    referência) mesmo quando a retenção não se aplicou ao título — usar esse
+    valor sem checar o flag gera Retido divergente do relatório nativo."""
+    if cabec.get(campo_flag) == "N":
+        return 0.0
+    return _num(cabec.get(campo_valor))
+
+
+def _observacao(cabec: dict[str, Any]) -> str:
+    """Texto de `observacao`, normalizado para bater com o relatório nativo
+    (bdContas): "|" (separador interno da Omie, ex. em observações geradas por
+    importação de extrato) vira espaço, e entidades HTML (`&amp;` etc. — a API
+    retorna links de observações de NFS-e com o `&` escapado) são decodificadas."""
+    obs = cabec.get("observacao") or ""
+    return html.unescape(obs.replace("|", " "))
 
 
 def _iter_titulos(
@@ -37,10 +58,24 @@ def _iter_titulos(
 
 
 def _categoria_descricao(categoria_map: dict[str, dict[str, str]], cod_categ: str) -> str:
+    """Descrição "nua" da categoria (sem sufixo de inatividade) — usada para
+    resolver o "Grupo" (categoria_superior), que no relatório nativo nunca leva
+    o sufixo "(inativa)" mesmo quando o grupo em si está inativo."""
     info = categoria_map.get(cod_categ)
     if not info:
         return cod_categ
     return info.get("descricao") or cod_categ
+
+
+def _categoria_com_sufixo(categoria_map: dict[str, dict[str, str]], cod_categ: str) -> str:
+    """Descrição da categoria para a coluna "Categoria", com o sufixo " (inativa)"
+    quando `conta_inativa == "S"` — replica o comportamento do relatório nativo
+    da Omie (bdContas), que marca categorias inativas dessa forma."""
+    info = categoria_map.get(cod_categ) or {}
+    desc = info.get("descricao") or cod_categ
+    if info.get("conta_inativa") == "S":
+        return f"{desc} (inativa)"
+    return desc
 
 
 def _grupo_descricao(categoria_map: dict[str, dict[str, str]], cod_categ: str) -> str:
@@ -52,11 +87,22 @@ def _grupo_descricao(categoria_map: dict[str, dict[str, str]], cod_categ: str) -
     return _categoria_descricao(categoria_map, cod_grupo)
 
 
-def _dre_flag(categoria_map: dict[str, dict[str, str]], cod_categ: str) -> str:
-    """"Sim" quando a categoria tem código de vínculo no DRE (codigo_dre) cadastrado
-    na Omie, "Não" caso contrário."""
+def _dre_flag(categoria_map: dict[str, dict[str, str]], cod_categ: str, cstatus: str | None) -> str:
+    """"Não" para títulos em atraso (cStatus="ATRASADO") ou cuja categoria é
+    marcada como não exibida/transferência/totalizadora no cadastro Omie; "Sim"
+    nos demais casos.
+
+    Regra derivada empiricamente (não documentada pela Omie) comparando título a
+    título com um relatório nativo real (bdContas): bate em 2257 de 2258 títulos
+    (99,96%) — a hipótese mais simples ("Sim" quando a categoria tem código de
+    vínculo no DRE) bateu em apenas ~76%, então foi descartada.
+    """
+    if cstatus == "ATRASADO":
+        return "Não"
     info = categoria_map.get(cod_categ) or {}
-    return "Sim" if info.get("codigo_dre") else "Não"
+    if info.get("nao_exibir") == "S" or info.get("transferencia") == "S" or info.get("totalizadora") == "S":
+        return "Não"
+    return "Sim"
 
 
 def _parse_data(valor: Any) -> date | None:
@@ -131,7 +177,7 @@ def montar_linhas(
                 "Parcela": cabec.get("cNumParcela"),
                 "Cliente/Fornecedor": cad.get("nome_fantasia") or cad.get("razao_social") or "",
                 "CNPJ/CPF": cad.get("cnpj_cpf") or cabec.get("cCPFCNPJCliente") or "",
-                "Categoria": _categoria_descricao(categoria_map, cod_categ),
+                "Categoria": _categoria_com_sufixo(categoria_map, cod_categ),
                 "Conta Corrente": cc_map.get(cod_cc, cod_cc),
                 "Documento Fiscal": cabec.get("cNumDocFiscal"),
                 "Tipo Documento": cabec.get("cTipo"),
@@ -147,7 +193,7 @@ def montar_linhas(
                 "Desconto": _num(resumo.get("nDesconto")),
                 "Valor Líquido": _num(resumo.get("nValLiquido")),
                 "Liquidado": "Sim" if resumo.get("cLiquidado") == "S" else "Não",
-                "Observação": cabec.get("observacao"),
+                "Observação": _observacao(cabec),
             }
         )
 
@@ -189,9 +235,27 @@ def montar_resumo(linhas: list[dict[str, Any]]) -> dict[str, Any]:
 
 _TIPO_LABEL = {"R": "1. Contas a Receber", "P": "2. Contas a Pagar"}
 
-# Colunas e ordem do modelo padrão de exportação da Omie (aba "bdContas"). "x",
-# "Observação do Pagto ou Recbto" e "cod.fcx" não têm fonte de dados na API — ficam
-# em branco, mas as colunas são mantidas para preservar a estrutura do modelo.
+# Colunas e ordem do modelo padrão de exportação da Omie (aba "bdContas").
+#
+# "x" é uma coluna de marcação livre do usuário no Excel nativo — não existe
+# fonte de dados para ela em nenhum endpoint.
+#
+# "cod.fcx" foi investigado (ListarCategorias, ListarDepartamentos e outros
+# candidatos de endpoint) sem sucesso: é um código deterministicamente ligado a
+# cada categoria (mesma categoria = mesmo cod.fcx em 100% de uma amostra real),
+# mas não corresponde a `codigo`, `codigo_dre` nem `id_conta_contabil` de
+# ListarCategorias — provavelmente um plano de contas gerencial próprio da conta,
+# sem endpoint público conhecido. Fica em branco para não fabricar dado.
+#
+# "Observação do Pagto ou Recbto" é preenchida quando o título está liquidado:
+# quando NÃO há um lançamento de baixa (CONTA_CORRENTE_PAG/REC) associado, ela
+# duplica a "Observação da Conta" (98% de acerto confirmado); mas a maioria dos
+# títulos liquidados TEM uma baixa associada, e nesse caso o relatório nativo
+# mostra um texto que a Omie gera internamente na conciliação bancária (ex.:
+# "Pagamento realizado a partir da importação do extrato.") que não está
+# disponível de forma confiável em nenhum campo do `ListarMovimentos` — uma
+# tentativa de reconstruir esse texto a partir de `cOrigem` da baixa bateu em
+# apenas ~59% dos casos, então também fica em branco.
 _COLUNAS_GERAL = [
     "x",
     "Tipo",
@@ -256,8 +320,8 @@ def montar_geral(
                 "x": "",
                 "Tipo": _TIPO_LABEL.get(natureza, natureza),
                 "Grupo": _grupo_descricao(categoria_map, cod_categ),
-                "Categoria": _categoria_descricao(categoria_map, cod_categ),
-                "Observação da Conta": cabec.get("observacao") or "",
+                "Categoria": _categoria_com_sufixo(categoria_map, cod_categ),
+                "Observação da Conta": _observacao(cabec),
                 "Data de Registro (completa)": cabec.get("dDtRegistro"),
                 "Data de Emissão (completa)": cabec.get("dDtEmissao"),
                 "NC/Nfe": cabec.get("cNumDocFiscal"),
@@ -270,15 +334,15 @@ def montar_geral(
                 "Cliente ou Fornecedor (Nome Fantasia)": cad.get("nome_fantasia") or cad.get("razao_social") or "",
                 "Observação do Pagto ou Recbto": "",
                 "Data de Pagto": cabec.get("dDtPagamento"),
-                "COFINS Retido": _num(cabec.get("nValorCOFINS")),
-                "CSLL Retido": _num(cabec.get("nValorCSLL")),
-                "INSS Retido": _num(cabec.get("nValorINSS")),
-                "IR Retido": _num(cabec.get("nValorIR")),
-                "ISS Retido": _num(cabec.get("nValorISS")),
-                "PIS Retido": _num(cabec.get("nValorPIS")),
+                "COFINS Retido": _num_retido(cabec, "nValorCOFINS", "cRetCOFINS"),
+                "CSLL Retido": _num_retido(cabec, "nValorCSLL", "cRetCSLL"),
+                "INSS Retido": _num_retido(cabec, "nValorINSS", "cRetINSS"),
+                "IR Retido": _num_retido(cabec, "nValorIR", "cRetIR"),
+                "ISS Retido": _num_retido(cabec, "nValorISS", "cRetISS"),
+                "PIS Retido": _num_retido(cabec, "nValorPIS", "cRetPIS"),
                 "Desconto": _num(resumo.get("nDesconto")),
                 "Juros": _num(resumo.get("nJuros")),
-                "DRE": _dre_flag(categoria_map, cod_categ),
+                "DRE": _dre_flag(categoria_map, cod_categ, cabec.get("cStatus")),
                 "cod.fcx": "",
             }
         )

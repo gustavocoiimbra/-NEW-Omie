@@ -46,20 +46,29 @@ def _listar_paginado(
     return itens
 
 
+_CAMPOS_CATEGORIA = (
+    "descricao", "categoria_superior", "codigo_dre",
+    "conta_inativa", "nao_exibir", "transferencia", "totalizadora",
+)
+
+
 def build_categoria_map(
     client: OmieClient, usar_cache: bool = True, ttl_segundos: float = TTL_PADRAO_SEGUNDOS
 ) -> dict[str, dict[str, str]]:
-    """Retorna {codigo_categoria: {descricao, categoria_superior, codigo_dre}}, usando
-    cache em disco quando disponível.
+    """Retorna {codigo_categoria: {descricao, categoria_superior, codigo_dre,
+    conta_inativa, nao_exibir, transferencia, totalizadora}}, usando cache em
+    disco quando disponível.
 
-    `categoria_superior` é o código do grupo da categoria (campo documentado pela
-    Omie) e `codigo_dre` é o código de vínculo da categoria no DRE — ambos usados
-    para resolver as colunas "Grupo" e "DRE" no layout padrão da aba Geral.
+    `categoria_superior`/`codigo_dre` resolvem as colunas "Grupo"/"DRE" no layout
+    padrão da aba Geral; `conta_inativa` marca o sufixo "(inativa)" na Categoria;
+    `nao_exibir`/`transferencia`/`totalizadora` são usados na regra de "DRE"
+    (veja `_dre_flag` em report_builder.py) — validados por amostragem contra um
+    relatório nativo real (bdContas): 2257/2258 títulos batem exatamente.
     """
     if usar_cache:
         cache = local_cache.carregar_com_ttl("categorias", ttl_segundos)
         if cache is not None:
-            if all(isinstance(v, dict) for v in cache.values()):
+            if all(isinstance(v, dict) and "conta_inativa" in v for v in cache.values()):
                 logger.info("Categorias carregadas do cache local: %d", len(cache))
                 return cache
             logger.info(
@@ -73,6 +82,10 @@ def build_categoria_map(
             "descricao": c.get("descricao", c["codigo"]),
             "categoria_superior": c.get("categoria_superior") or "",
             "codigo_dre": c.get("codigo_dre") or "",
+            "conta_inativa": c.get("conta_inativa") or "N",
+            "nao_exibir": c.get("nao_exibir") or "N",
+            "transferencia": c.get("transferencia") or "N",
+            "totalizadora": c.get("totalizadora") or "N",
         }
         for c in categorias
         if c.get("codigo")

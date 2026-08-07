@@ -20,13 +20,24 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src import report_builder  # noqa: E402
 from src.excel_writer import escrever_relatorio  # noqa: E402
 
+def _cat(descricao, categoria_superior="", **flags):
+    base = {"descricao": descricao, "categoria_superior": categoria_superior, "codigo_dre": ""}
+    base.update({"conta_inativa": "N", "nao_exibir": "N", "transferencia": "N", "totalizadora": "N"})
+    base.update(flags)
+    return base
+
+
 CATEGORIA_MAP = {
-    "1.01": {"descricao": "Receita Operacional", "categoria_superior": "", "codigo_dre": ""},
-    "1.01.01": {"descricao": "Vendas de Produtos", "categoria_superior": "1.01", "codigo_dre": "3.01.01"},
-    "2.01": {"descricao": "Despesas Operacionais", "categoria_superior": "", "codigo_dre": ""},
-    "2.01.03": {"descricao": "Insumos", "categoria_superior": "2.01", "codigo_dre": "4.01.03"},
-    "2.01.05": {"descricao": "Despesas Gerais", "categoria_superior": "2.01", "codigo_dre": ""},
-    "2.01.06": {"descricao": "Despesas Administrativas", "categoria_superior": "2.01", "codigo_dre": "4.01.06"},
+    "1.01": _cat("Receita Operacional"),
+    "1.01.01": _cat("Vendas de Produtos", "1.01"),
+    "2.01": _cat("Despesas Operacionais"),
+    # inativa + nao_exibir=S: testa o sufixo "(inativa)" na Categoria (sem afetar
+    # o Grupo) e o "DRE"="Não" por flag de categoria num título NÃO atrasado
+    # (título 2001, status AVENCER) — distinto do caso 2002, que é "Não" por
+    # estar com cStatus=ATRASADO.
+    "2.01.03": _cat("Insumos", "2.01", conta_inativa="S", nao_exibir="S"),
+    "2.01.05": _cat("Despesas Gerais", "2.01"),
+    "2.01.06": _cat("Despesas Administrativas", "2.01"),
 }
 CC_MAP = {1: "Banco X - Conta Corrente", 2: "Banco Y - Conta Corrente"}
 
@@ -52,7 +63,16 @@ def main() -> None:
     assert linhas[0]["Cliente/Fornecedor"] == "Alfa"
     assert linhas[0]["Categoria"] == "Vendas de Produtos"
     assert linhas[0]["Conta Corrente"] == "Banco X - Conta Corrente"
+    assert linhas[0]["Observação"] == "Venda de produtos Nota adicional", (
+        "\"|\" na observação bruta deve virar espaço (formato do relatório nativo)"
+    )
     print("OK: montar_linhas")
+
+    linha_2001 = next(l for l in linhas if l["Código Título"] == 2001)
+    assert linha_2001["Categoria"] == "Insumos (inativa)", (
+        "categoria com conta_inativa=S deve ganhar o sufixo \" (inativa)\""
+    )
+    print("OK: montar_linhas (sufixo \"(inativa)\" na Categoria)")
 
     # Título 2002 tem aCodCateg (rateio) na amostra bruta, mas isso é ignorado:
     # o valor cheio do título fica sob a categoria única de cCodCateg.
@@ -119,8 +139,17 @@ def main() -> None:
     assert list(df_geral["Grupo"]) == [
         "Despesas Operacionais", "Receita Operacional", "Receita Operacional", "Despesas Operacionais",
     ]
-    assert list(df_geral["DRE"]) == ["Não", "Sim", "Sim", "Sim"], (
-        "2.01.05 (título 2002) não tem codigo_dre (Não); as demais categorias têm (Sim)"
+    # DRE="Não" por dois motivos distintos (regra validada contra um relatório
+    # nativo real, bdContas): título 2002 está com cStatus=ATRASADO; título 2001
+    # está numa categoria com nao_exibir=S. Os demais (não atrasados, categoria
+    # sem flag de exclusão) são "Sim" por padrão.
+    assert list(df_geral["DRE"]) == ["Não", "Sim", "Sim", "Não"]
+    assert df_geral.iloc[3]["Categoria"] == "Insumos (inativa)", (
+        "sufixo \"(inativa)\" também deve aparecer na aba Geral (layout bdContas)"
+    )
+    assert df_geral.iloc[1]["Observação da Conta"] == "Venda de produtos Nota adicional"
+    assert df_geral.iloc[3]["Observação da Conta"] == "Compra de insumos & materiais", (
+        "entidade HTML (&amp;) na observação bruta deve ser decodificada (formato do relatório nativo)"
     )
     assert list(df_geral["Situação do Vencimento"]) == [
         "Vencido até 30 dias", "Vencido até 30 dias", "Recebido", "A vencer até 30 dias",
@@ -132,6 +161,10 @@ def main() -> None:
     _assert_quase_igual(df_geral.iloc[0]["IR Retido"], 100.0, "IR Retido (cheio, sem rateio)")
     _assert_quase_igual(df_geral.iloc[0]["PIS Retido"], 30.0, "PIS Retido (cheio, sem rateio)")
     _assert_quase_igual(df_geral.iloc[0]["COFINS Retido"], 50.0, "COFINS Retido (cheio, sem rateio)")
+    _assert_quase_igual(
+        df_geral.iloc[0]["ISS Retido"], 0.0,
+        "ISS Retido deve zerar quando cRetISS='N', mesmo com nValorISS=10.00 preenchido"
+    )
     print("OK: montar_geral (retenções de impostos, sem proporção de rateio)")
 
     # Datas reais (não texto) — necessário para o formato dd/mm/yyyy funcionar no Excel.

@@ -19,7 +19,7 @@
       "cNumParcela": "001/001",
       "nValorTitulo": 1500.00,
       "dDtRegistro": "28/06/2026",
-      "observacao": "Venda de produtos"
+      "observacao": "Venda de produtos|Nota adicional"
     },
     "lancamentos": [],
     "resumo": {
@@ -83,7 +83,7 @@
       "aCodCateg": [{"cCodCateg": "2.01.03", "nPerc": 100.0, "nValor": 950.00}],
       "cNumParcela": "001/001",
       "nValorTitulo": 950.00,
-      "observacao": "Compra de insumos"
+      "observacao": "Compra de insumos &amp; materiais"
     },
     "lancamentos": [],
     "resumo": {
@@ -124,6 +124,7 @@
       "nValorCSLL": 20.00,
       "nValorIR": 100.00,
       "nValorISS": 10.00,
+      "cRetISS": "N",
       "nValorINSS": 0.00,
       "observacao": ""
     },
