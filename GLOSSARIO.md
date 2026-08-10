@@ -167,14 +167,14 @@ um `cabecTitulo` (dados cadastrais) e um `resumo` (valores).
 | `fluxo_semanal` / `saldo_previsto_acumulado` | `extrato.py` | Lançamentos previstos agrupados por semana, com saldo acumulado (`saldo_real_total` + previstos até aquela semana) |
 | `Situação do Vencimento` | `report_builder.py` | Faixa de vencimento (ex.: "Vencido até 30 dias") — mesmo critério do relatório nativo da Omie |
 
-## 4. As 4 contas operacionais consideradas no caixa
+## 4. As contas operacionais consideradas no caixa
 
 Definidas em `extrato.py::CONTAS_ALVO`, resolvidas por nome (não por código
-fixo) contra o cadastro de `ListarContasCorrentes`:
+fixo) contra o cadastro de `ListarContasCorrentes`: são 4 contas — 2 contas
+correntes principais e a respectiva conta de aplicação/investimento de cada
+uma. Os nomes exatos das instituições ficam só no código (`extrato.py`), não
+neste documento, já que são um dado específico do cliente, não da lógica do
+projeto.
 
-- Banco Bradesco
-- Banco Bradesco Aplicação
-- Banco Itaú
-- Banco Itaú Aplicação
-
-Contas de caixinha, adiantamento e Omie.CASH ficam de fora propositalmente.
+Contas de caixinha, adiantamento e outras contas auxiliares ficam de fora
+propositalmente — só entram no cálculo as 4 contas operacionais.
