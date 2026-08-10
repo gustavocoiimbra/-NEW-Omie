@@ -5,6 +5,7 @@ __pycache__/
 venv/
 output/*.xlsx
 output/*.csv
+output/*.json
 debug_raw/*.json
 .cache/
 
@@ -12,3 +13,4 @@ debug_raw/*.json
 # usadas como referência de layout — não devem ser versionadas.
 *.xlsb
 *.csv
+

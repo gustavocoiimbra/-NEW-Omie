@@ -50,20 +50,23 @@ def _status_contrato(parcelas: list[dict[str, Any]]) -> str:
     """Status agregado do contrato, por prioridade:
 
     1. "Em atraso" — tem ao menos uma parcela vencida e não paga.
-    2. "Ativo" — não está em atraso e tem ao menos uma previsão futura
-       (a Omie continua gerando cobrança para esse contrato).
+    2. "Ativo" — não está em atraso e tem ao menos uma parcela futura,
+       prevista ou já emitida e ainda não vencida (a Omie continua gerando
+       cobrança para esse contrato). Nos dados reais, "Em aberto" sempre
+       vem acompanhado de "Previsto" enquanto o contrato segue rodando —
+       mas checar os dois evita classificar como "Encerrado" um contrato
+       cuja última parcela emitida ainda nem venceu.
     3. "Cancelado" — todas as parcelas já lançadas (exclui previsões) estão
-       canceladas, e não há previsão futura.
+       canceladas, e não há parcela futura.
     4. "Encerrado" — nenhuma das situações acima: teve parcelas normais no
        passado, mas não há mais nada previsto (contrato parece ter parado).
     """
     situacoes = [p["situacao"] for p in parcelas]
     if "Atrasado" in situacoes:
         return "Em atraso"
-    if "Previsto" in situacoes:
+    if "Previsto" in situacoes or "Em aberto" in situacoes:
         return "Ativo"
-    realizadas = [s for s in situacoes if s != "Previsto"]
-    if realizadas and all(s == "Cancelado" for s in realizadas):
+    if situacoes and all(s == "Cancelado" for s in situacoes):
         return "Cancelado"
     return "Encerrado"
 
@@ -122,11 +125,12 @@ def montar_contratos(
         nao_canceladas = [p for p in parcelas if p["situacao"] != "Cancelado"]
         valor_recorrente = nao_canceladas[-1]["valor"] if nao_canceladas else parcelas[-1]["valor"]
 
-        proximas = [
-            p for p in parcelas
-            if p["situacao"] in ("Previsto", "Em aberto")
-            and (_parse_data(p["vencimento"]) or hoje) >= hoje
-        ]
+        # Inclui "Atrasado": se a única parcela pendente já venceu, ela é o
+        # próximo pagamento a acompanhar — deixar `proxima_parcela` em branco
+        # nesse caso escondia exatamente os contratos que mais precisam de
+        # atenção (ex.: um contrato "Em atraso" com uma única parcela vencida
+        # ficava sem nenhuma parcela sinalizada aqui).
+        proximas = [p for p in parcelas if p["situacao"] in ("Previsto", "Em aberto", "Atrasado")]
         proxima_parcela = min(proximas, key=lambda p: _parse_data(p["vencimento"]) or hoje) if proximas else None
 
         resumo = {
