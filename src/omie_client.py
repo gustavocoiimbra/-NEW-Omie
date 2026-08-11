@@ -170,10 +170,15 @@ class OmieClient:
         sufixo = uuid.uuid4().hex[:6]
         nome = f"{ts}_{chamada}_try{tentativa}_{sufixo}.json"
         caminho = os.path.join(self.debug_dir, nome)
+        payload_sem_credenciais = {**payload, "app_key": "***", "app_secret": "***"}
         try:
             with open(caminho, "w", encoding="utf-8") as f:
                 json.dump(
-                    {"request": payload, "status_code": resp.status_code, "response": self._safe_json(resp)},
+                    {
+                        "request": payload_sem_credenciais,
+                        "status_code": resp.status_code,
+                        "response": self._safe_json(resp),
+                    },
                     f,
                     ensure_ascii=False,
                     indent=2,
