@@ -1,6 +1,6 @@
 """Saldo de caixa (real + previsto) via `financas/extrato` (`ListarExtrato`).
 
-Soma o saldo real das contas correntes operacionais da Centria (saldo já
+Soma o saldo real das contas correntes operacionais configuradas (saldo já
 conciliado no fechamento do dia anterior) com os lançamentos previstos ("a
 vencer") do extrato bancário, agregados por semana, para uma projeção simples
 de fluxo de caixa.
@@ -35,34 +35,39 @@ logger = logging.getLogger("extrato")
 MODULO = "financas/extrato"
 CHAMADA = "ListarExtrato"
 
-# Nomes de exibição das 4 contas operacionais consideradas no saldo de caixa
-# da Centria — resolvidos por substring (case-insensitive) contra a descrição
-# cadastrada em ListarContasCorrentes. Contas de caixinha/adiantamento/Omie.CASH
-# ficam de fora propositalmente.
-CONTAS_ALVO = ("Banco Bradesco", "Banco Bradesco Aplicação", "Banco Itaú", "Banco Itaú Aplicação")
+def resolver_contas_alvo(
+    cc_map: dict[int, str], contas_alvo: tuple[tuple[str, str], ...]
+) -> dict[str, int]:
+    """Mapeia as contas configuradas em `OMIE_CONTAS_CAIXA` (`.env`, lido por
+    `config.carregar_config` como pares `(nome no cadastro, rótulo de
+    exibição)`) -> `nCodCC`, por correspondência **exata** com a descrição
+    cadastrada em `ListarContasCorrentes`. Os nomes de banco não ficam
+    hardcoded no código — só no `.env` de cada instalação.
 
+    Lança `ValueError` se `contas_alvo` estiver vazio (variável não
+    configurada) ou se alguma conta não for encontrada no cadastro — falha
+    explícita em vez de silenciar uma conta ausente do cálculo de saldo."""
+    if not contas_alvo:
+        raise ValueError(
+            "OMIE_CONTAS_CAIXA não configurado no .env — defina as contas correntes "
+            "a considerar no saldo de caixa (veja o exemplo em .env.example)."
+        )
 
-def resolver_contas_alvo(cc_map: dict[int, str]) -> dict[str, int]:
-    """Mapeia os 4 nomes de `CONTAS_ALVO` -> `nCodCC`, a partir do cadastro
-    retornado por `enrichment.build_conta_corrente_map`. Lança `ValueError`
-    se alguma das 4 não for encontrada (falha explícita em vez de silenciar
-    uma conta ausente do cálculo de saldo)."""
+    por_nome_cadastro = {desc: cod for cod, desc in cc_map.items()}
     resolvidas: dict[str, int] = {}
-    for cod, desc in cc_map.items():
-        d = desc.lower()
-        eh_aplicacao = "aplica" in d
-        if "bradesco" in d:
-            resolvidas["Banco Bradesco Aplicação" if eh_aplicacao else "Banco Bradesco"] = cod
-        elif "itau" in d or "itaú" in d:
-            resolvidas["Banco Itaú Aplicação" if eh_aplicacao else "Banco Itaú"] = cod
+    faltando: list[str] = []
+    for nome_cadastro, rotulo in contas_alvo:
+        if nome_cadastro in por_nome_cadastro:
+            resolvidas[rotulo] = por_nome_cadastro[nome_cadastro]
+        else:
+            faltando.append(nome_cadastro)
 
-    faltando = set(CONTAS_ALVO) - resolvidas.keys()
     if faltando:
         raise ValueError(
-            f"Contas correntes não encontradas no cadastro Omie: {sorted(faltando)}. "
-            "Verifique se os nomes cadastrados em ListarContasCorrentes mudaram."
+            f"Contas correntes não encontradas no cadastro Omie: {faltando}. "
+            "Verifique OMIE_CONTAS_CAIXA no .env contra os nomes cadastrados em ListarContasCorrentes."
         )
-    return {nome: resolvidas[nome] for nome in CONTAS_ALVO}
+    return resolvidas
 
 
 def _parse_data(valor: str | None) -> date | None:
@@ -109,19 +114,21 @@ def _lancamentos_previstos_da_conta(resp: dict[str, Any], nome_conta: str, hoje:
 def montar_saldo_caixa(
     client: OmieClient,
     cc_map: dict[int, str],
+    contas_alvo: tuple[tuple[str, str], ...],
     hoje: date | None = None,
     dias_previsao: int = 90,
 ) -> dict[str, Any]:
-    """Monta o saldo de caixa das 4 contas operacionais da Centria: saldo real
-    de hoje (soma do `nSaldoAnterior` de cada conta) + lançamentos previstos
-    "a vencer" nos próximos `dias_previsao` dias + saldo previsto (real +
-    previstos), com um recorte semanal do fluxo projetado.
+    """Monta o saldo de caixa das contas operacionais configuradas em
+    `OMIE_CONTAS_CAIXA` (`.env`): saldo real de hoje (soma do `nSaldoAnterior`
+    de cada conta) + lançamentos previstos "a vencer" nos próximos
+    `dias_previsao` dias + saldo previsto (real + previstos), com um recorte
+    semanal do fluxo projetado.
     """
     hoje = hoje or date.today()
     hoje_str = hoje.strftime("%d/%m/%Y")
     fim_str = (hoje + timedelta(days=dias_previsao)).strftime("%d/%m/%Y")
 
-    contas = resolver_contas_alvo(cc_map)
+    contas = resolver_contas_alvo(cc_map, contas_alvo)
 
     saldo_por_conta: dict[str, float] = {}
     lancamentos: list[dict[str, Any]] = []

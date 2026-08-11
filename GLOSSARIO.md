@@ -169,12 +169,16 @@ um `cabecTitulo` (dados cadastrais) e um `resumo` (valores).
 
 ## 4. As contas operacionais consideradas no caixa
 
-Definidas em `extrato.py::CONTAS_ALVO`, resolvidas por nome (não por código
-fixo) contra o cadastro de `ListarContasCorrentes`: são 4 contas — 2 contas
-correntes principais e a respectiva conta de aplicação/investimento de cada
-uma. Os nomes exatos das instituições ficam só no código (`extrato.py`), não
-neste documento, já que são um dado específico do cliente, não da lógica do
-projeto.
+Configuradas na variável `OMIE_CONTAS_CAIXA` do `.env` (lida por
+`config.carregar_config`, não hardcoded em nenhum arquivo `.py`) — uma lista
+de pares `nome exato no cadastro Omie : rótulo de exibição`, separados por
+vírgula. `extrato.py::resolver_contas_alvo` casa cada nome contra o cadastro
+de `ListarContasCorrentes` por correspondência **exata** (não por substring)
+e usa o rótulo configurado como chave no `saldo_real_por_conta` do JSON de
+saída.
 
-Contas de caixinha, adiantamento e outras contas auxiliares ficam de fora
-propositalmente — só entram no cálculo as 4 contas operacionais.
+Como os nomes reais das instituições ficam só no `.env` de cada instalação
+(fora do controle de versão), nem o código nem este documento precisam
+expor quais bancos o cliente usa. Contas de caixinha, adiantamento e outras
+contas auxiliares ficam de fora — só entram no cálculo as contas listadas em
+`OMIE_CONTAS_CAIXA`.

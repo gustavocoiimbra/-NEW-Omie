@@ -21,12 +21,21 @@ from src import extrato as extrato_mod  # noqa: E402
 HOJE = date(2026, 8, 10)
 
 CC_MAP = {
-    1: "Bradesco",
-    2: "Bradesco - CONTA APLICAÇÃO",
-    3: "Itaú Unibanco",
-    4: "Itaú Unibanco - CONTA APLICAÇÃO",
+    1: "Banco X",
+    2: "Banco X - CONTA APLICAÇÃO",
+    3: "Banco Y",
+    4: "Banco Y - CONTA APLICAÇÃO",
     5: "Caixinha",  # nao deve ser resolvida como conta alvo
 }
+
+# Simula o formato de OMIE_CONTAS_CAIXA (.env), ja parseado por
+# config._parse_contas_caixa: pares (nome no cadastro, rotulo de exibicao).
+CONTAS_ALVO = (
+    ("Banco X", "Conta Corrente X"),
+    ("Banco X - CONTA APLICAÇÃO", "Aplicação X"),
+    ("Banco Y", "Conta Corrente Y"),
+    ("Banco Y - CONTA APLICAÇÃO", "Aplicação Y"),
+)
 
 
 def _mov(situacao, data, valor, cliente="Fornecedor X", categoria="Categoria X"):
@@ -44,7 +53,7 @@ def _mov(situacao, data, valor, cliente="Fornecedor X", categoria="Categoria X")
 # retorna: marcadores SALDO/SALDO ANTERIOR (sem cSituacao) + transacoes reais.
 RESPOSTAS = {
     1: {
-        "nCodCC": 1, "cDescricao": "Bradesco",
+        "nCodCC": 1, "cDescricao": "Banco X",
         "nSaldoAnterior": 1000.0, "nSaldoAtual": 1000.0,
         "listaMovimentos": [
             {"cDesCliente": "SALDO ANTERIOR", "dDataLancamento": "09/08/2026", "nSaldo": 1000.0, "nValorDocumento": 0},
@@ -55,19 +64,19 @@ RESPOSTAS = {
         ],
     },
     2: {
-        "nCodCC": 2, "cDescricao": "Bradesco - CONTA APLICAÇÃO",
+        "nCodCC": 2, "cDescricao": "Banco X - CONTA APLICAÇÃO",
         "nSaldoAnterior": 5000.0, "nSaldoAtual": 5000.0,
         "listaMovimentos": [],
     },
     3: {
-        "nCodCC": 3, "cDescricao": "Itaú Unibanco",
+        "nCodCC": 3, "cDescricao": "Banco Y",
         "nSaldoAnterior": 2000.0, "nSaldoAtual": 2000.0,
         "listaMovimentos": [
             _mov("Previsto", "24/08/2026", 1000.0),  # 2 semanas a frente
         ],
     },
     4: {
-        "nCodCC": 4, "cDescricao": "Itaú Unibanco - CONTA APLICAÇÃO",
+        "nCodCC": 4, "cDescricao": "Banco Y - CONTA APLICAÇÃO",
         "nSaldoAnterior": 500.0, "nSaldoAtual": 500.0,
         "listaMovimentos": [],
     },
@@ -86,20 +95,27 @@ def _assert_quase_igual(a: float, b: float, msg: str) -> None:
 
 
 def main() -> None:
-    contas = extrato_mod.resolver_contas_alvo(CC_MAP)
+    contas = extrato_mod.resolver_contas_alvo(CC_MAP, CONTAS_ALVO)
     assert contas == {
-        "Banco Bradesco": 1, "Banco Bradesco Aplicação": 2, "Banco Itaú": 3, "Banco Itaú Aplicação": 4,
+        "Conta Corrente X": 1, "Aplicação X": 2, "Conta Corrente Y": 3, "Aplicação Y": 4,
     }
-    print("OK: resolver_contas_alvo mapeia as 4 contas pelo nome cadastrado")
+    print("OK: resolver_contas_alvo mapeia as contas por nome exato, com o rótulo configurado")
 
     try:
-        extrato_mod.resolver_contas_alvo({1: "Bradesco"})
+        extrato_mod.resolver_contas_alvo({1: "Banco X"}, CONTAS_ALVO)
         raise AssertionError("deveria ter levantado ValueError com contas faltando")
     except ValueError as exc:
-        assert "Itaú" in str(exc)
-    print("OK: resolver_contas_alvo levanta erro claro quando falta alguma conta")
+        assert "Banco Y" in str(exc)
+    print("OK: resolver_contas_alvo levanta erro claro quando falta alguma conta no cadastro")
 
-    saldo = extrato_mod.montar_saldo_caixa(_ClienteFalso(), CC_MAP, hoje=HOJE, dias_previsao=30)
+    try:
+        extrato_mod.resolver_contas_alvo(CC_MAP, ())
+        raise AssertionError("deveria ter levantado ValueError com OMIE_CONTAS_CAIXA vazio")
+    except ValueError as exc:
+        assert "OMIE_CONTAS_CAIXA" in str(exc)
+    print("OK: resolver_contas_alvo levanta erro claro quando OMIE_CONTAS_CAIXA não está configurado")
+
+    saldo = extrato_mod.montar_saldo_caixa(_ClienteFalso(), CC_MAP, CONTAS_ALVO, hoje=HOJE, dias_previsao=30)
 
     _assert_quase_igual(saldo["saldo_real_total"], 1000.0 + 5000.0 + 2000.0 + 500.0, "saldo_real_total")
     print("OK: saldo_real_total soma nSaldoAnterior das 4 contas")

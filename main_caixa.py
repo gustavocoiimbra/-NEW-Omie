@@ -1,7 +1,7 @@
-"""Ponto de entrada do saldo de caixa: busca o extrato das 4 contas
-operacionais da Centria via `ListarExtrato` (src/extrato.py) e grava um JSON
-com o saldo real, os lançamentos previstos "a vencer" e o fluxo semanal
-projetado.
+"""Ponto de entrada do saldo de caixa: busca o extrato das contas operacionais
+configuradas em `OMIE_CONTAS_CAIXA` (`.env`) via `ListarExtrato`
+(src/extrato.py) e grava um JSON com o saldo real, os lançamentos previstos
+"a vencer" e o fluxo semanal projetado.
 
 Uso:
     python main_caixa.py --semanas 12
@@ -26,7 +26,7 @@ logger = logging.getLogger("caixa")
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="saldo-caixa-omie",
-        description="Gera o JSON de saldo de caixa (real + previsto por semana) das contas da Centria.",
+        description="Gera o JSON de saldo de caixa (real + previsto por semana) das contas configuradas.",
     )
     p.add_argument("--semanas", type=int, default=12, help="Quantas semanas à frente projetar (padrão: 12)")
     p.add_argument("--output", default=os.path.join("output", "caixa.json"), help="Caminho do JSON de saída")
@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cc_map = build_conta_corrente_map(client, usar_cache=usar_cache_disco, ttl_segundos=ttl_segundos)
         logger.info("Consultando saldo de caixa (%d semanas à frente)...", args.semanas)
-        saldo = montar_saldo_caixa(client, cc_map, dias_previsao=dias_previsao)
+        saldo = montar_saldo_caixa(client, cc_map, config.contas_caixa, dias_previsao=dias_previsao)
         logger.info(
             "Saldo real: R$ %.2f | Previsto (%d lançamentos): R$ %.2f | Saldo previsto: R$ %.2f",
             saldo["saldo_real_total"], len(saldo["lancamentos_previstos"]), saldo["total_previsto"],
