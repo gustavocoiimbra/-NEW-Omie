@@ -1,5 +1,7 @@
 """Teste offline (sem rede) para src/contratos.py: cobre os dois bugs
-encontrados em revisão de código e corrigidos em seguida —
+encontrados em revisão de código e corrigidos em seguida, mais o uso do
+cadastro de contratos (ListarContratos) e a reconciliação heurística de
+títulos órfãos investigados em sondas/PESQUISA_CONTRATOS_OS.md —
 
 1. Contrato com única parcela pendente já vencida ("Atrasado", sem nenhuma
    "Previsto"/"Em aberto") tinha `proxima_parcela=None`, escondendo o pagamento
@@ -7,6 +9,14 @@ encontrados em revisão de código e corrigidos em seguida —
 2. Contrato cuja única parcela futura já foi emitida mas ainda não venceu
    ("Em aberto", sem nenhuma "Previsto" associada) era classificado como
    "Encerrado" em vez de "Ativo".
+3. Contrato cadastrado sem nenhum título com nCodCtr na janela consultada
+   ficava totalmente ausente do relatório — agora aparece com status vindo
+   do cadastro (`status_cadastro`/`cCodSit`).
+4. Título faturado sem nCodCtr (ex.: lançado por conciliação bancária
+   manual) é religado ao contrato certo do mesmo cliente quando há
+   exatamente 1 candidato plausível (mesma natureza, vencimento dentro da
+   vigência, valor ~igual ao valor mensal cadastrado) — e permanece órfão
+   quando ambíguo ou incompatível.
 
 Uso:
     python tests/test_contratos_offline.py
@@ -37,7 +47,7 @@ def _titulo(n_cod_titulo, n_cod_ctr, cod_cliente, status, venc, pagamento=None, 
         "cabecTitulo": {
             "nCodTitulo": n_cod_titulo,
             "nCodCtr": n_cod_ctr,
-            "cNumCtr": f"2026/{n_cod_ctr:05d}",
+            "cNumCtr": f"2026/{n_cod_ctr:05d}" if n_cod_ctr is not None else None,
             "nCodCliente": cod_cliente,
             "nCodCC": 1,
             "cCodCateg": "1.01.99",
@@ -107,7 +117,102 @@ def main() -> None:
     assert delta["proxima_parcela"] is None
     print("OK: contrato sem nada pendente ou previsto -> Encerrado (regressao: comportamento inalterado)")
 
+    _testar_cadastro_e_heuristica()
+
     print("\nTodos os testes offline de contratos passaram.")
+
+
+def _testar_cadastro_e_heuristica() -> None:
+    cliente_map = {
+        555: {"razao_social": "Cliente Alfa Ltda", "nome_fantasia": "Alfa", "cnpj_cpf": ""},
+        900: {"razao_social": "Cliente Epsilon Ltda", "nome_fantasia": "Epsilon", "cnpj_cpf": ""},
+        901: {"razao_social": "Cliente Zeta Ltda", "nome_fantasia": "Zeta", "cnpj_cpf": ""},
+    }
+
+    contratos_cadastro = {
+        # Contrato ativo no cadastro, mas nenhum titulo com nCodCtr=10 vai
+        # aparecer nos titulos_raw abaixo -> deve aparecer mesmo assim, com
+        # status vindo do cadastro.
+        10: {
+            "nCodCtr": 10, "cNumCtr": "2026/00010", "nCodCli": 900,
+            "cCodSit": "10", "status_cadastro": "Ativo",
+            "dVigInicial": "01/01/2026", "dVigFinal": "31/12/2026",
+            "nDiaFat": 5, "nValTotMes": 5000.0,
+        },
+        # Contrato da Zeta: titulo orfao (sem nCodCtr) do mesmo cliente, com
+        # valor e vencimento batendo com este contrato -> deve ser religado.
+        11: {
+            "nCodCtr": 11, "cNumCtr": "2026/00011", "nCodCli": 901,
+            "cCodSit": "10", "status_cadastro": "Ativo",
+            "dVigInicial": "01/01/2026", "dVigFinal": "31/12/2026",
+            "nDiaFat": 10, "nValTotMes": 3000.0,
+        },
+    }
+
+    titulo_alfa = _titulo(1001, 1, 555, "RECEBIDO", "30/04/2026", "30/04/2026")
+
+    # Orfao plausivel: mesmo cliente do contrato 11, valor identico, dentro
+    # da vigencia -> deve casar (heuristico).
+    titulo_orfao_zeta = _titulo(9001, None, 901, "ATRASADO", "10/03/2026", valor=3000.0)
+
+    # Orfao implausivel (mesmo cliente 901, mas fora da vigencia do contrato
+    # 11 e valor bem diferente) -> nao deve casar com nada, mas tem cara de
+    # contrato (mesmo cliente) -> deve virar sinal de revisao manual.
+    titulo_orfao_zeta_fora = _titulo(9002, None, 901, "ATRASADO", "10/03/2027", valor=999.0)
+
+    # Orfao CANCELADO do mesmo cliente -> nao representa pagamento nem
+    # pendencia real, nao pode nem religar nem virar sinal de revisao.
+    titulo_orfao_zeta_cancelado = _titulo(9003, None, 901, "CANCELADO", "10/06/2026", valor=3000.0)
+
+    titulos_raw = [titulo_alfa, titulo_orfao_zeta, titulo_orfao_zeta_fora, titulo_orfao_zeta_cancelado]
+
+    contratos = ctr_mod.montar_contratos(
+        titulos_raw, CATEGORIA_MAP, CC_MAP, cliente_map, contratos_cadastro, hoje=HOJE
+    )
+    por_ctr = {c["nCodCtr"]: c for c in contratos}
+
+    assert 10 in por_ctr, "bug: contrato cadastrado sem titulo casado nao pode desaparecer do relatorio"
+    epsilon = por_ctr[10]
+    assert epsilon["cliente"] == "Epsilon"
+    assert epsilon["parcelas"] == []
+    assert epsilon["status_contrato"] == "Ativo"
+    assert epsilon["status_cadastro"] == "Ativo"
+    assert epsilon["origem_status"] == "cadastro"
+    assert epsilon["valor_recorrente"] == 5000.0
+    print("OK: contrato cadastrado sem nenhum titulo casado aparece no relatorio, status vem do cadastro")
+
+    zeta = por_ctr[11]
+    assert zeta["cliente"] == "Zeta"
+    assert len(zeta["parcelas"]) == 1, "bug: titulo orfao plausivel deveria ter sido religado por heuristica"
+    assert zeta["parcelas"][0]["nCodTitulo"] == 9001
+    assert zeta["parcelas"][0]["vinculo"] == "heuristico"
+    assert zeta["origem_status"] == "parcelas"
+    print("OK: titulo orfao com cliente/valor/data batendo com 1 contrato -> religado (vinculo=heuristico)")
+
+    # O titulo implausivel nao pode ter sido religado a lugar nenhum -> nao
+    # deve existir grupo extra e o total de contratos fica so 1 (Alfa) + os
+    # 2 do cadastro (Epsilon, Zeta).
+    assert len(contratos) == 3, f"orfao implausivel nao deveria criar/entrar em nenhum grupo (contratos={len(contratos)})"
+    ids_parcelas_zeta = {p["nCodTitulo"] for p in zeta["parcelas"]}
+    assert 9002 not in ids_parcelas_zeta, "bug: titulo fora da vigencia/valor incompativel nao pode ser religado"
+    print("OK: titulo orfao implausivel (fora da vigencia, valor incompativel) permanece nao religado")
+
+    ids_revisao_zeta = {r["nCodTitulo"] for r in zeta["titulos_para_revisao"]}
+    assert ids_revisao_zeta == {9002}, (
+        f"bug: titulo orfao implausivel do mesmo cliente devia virar sinal de revisao manual (obtido {ids_revisao_zeta})"
+    )
+    motivo = zeta["titulos_para_revisao"][0]["motivo"]
+    assert "vigência" in motivo and "valor" in motivo, f"motivo devia explicar data E valor incompativeis (obtido {motivo!r})"
+    print("OK: titulo orfao implausivel vira sinal de titulos_para_revisao, com motivo explicando a incompatibilidade")
+
+    assert 9003 not in ids_parcelas_zeta, "bug: titulo orfao CANCELADO nao pode ser religado por heuristica"
+    assert 9003 not in ids_revisao_zeta, "bug: titulo orfao CANCELADO nao pode virar sinal de revisao (nao ajuda o usuario a decidir nada)"
+    print("OK: titulo orfao CANCELADO fica fora tanto da religacao heuristica quanto do sinal de revisao")
+
+    alfa = por_ctr[1]
+    assert alfa["parcelas"][0]["vinculo"] == "confirmado"
+    assert alfa["titulos_para_revisao"] == []
+    print("OK: titulo com nCodCtr direto continua marcado como vinculo=confirmado")
 
 
 if __name__ == "__main__":
