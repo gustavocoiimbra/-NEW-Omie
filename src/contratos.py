@@ -121,9 +121,11 @@ def _status_contrato(parcelas: list[dict[str, Any]]) -> str:
 _TOLERANCIA_VALOR_HEURISTICO = 0.05  # 5% — calibrado contra casos reais, ver PESQUISA_CONTRATOS_OS.md
 
 # Teto de plausibilidade pro SINAL de revisão (não pra religação automática):
-# além dessa distância do valor mensal cadastrado, um título não é "quase uma
-# correspondência" — é outra cobrança do mesmo cliente sem relação com este
-# contrato. Achado real que motivou o teto: sem ele, um título de R$ 30.000
+# além dessa distância do valor de referência do contrato (ver
+# _valor_referencia_contrato — nValTotMes cadastrado na época deste achado),
+# um título não é "quase uma correspondência" — é outra cobrança do mesmo
+# cliente sem relação com este contrato. Achado real que motivou o teto: sem
+# ele, um título de R$ 30.000
 # era sinalizado pra revisão de um contrato de R$ 15.000/mês (100% de
 # diferença) só por ser do mesmo cliente — ver PESQUISA_CONTRATOS_OS.md,
 # seção 11. Calibrado pela distribuição real: 18 dos 103 títulos então
@@ -132,36 +134,88 @@ _TOLERANCIA_VALOR_HEURISTICO = 0.05  # 5% — calibrado contra casos reais, ver 
 # passava de 75%, alguns acima de 1000% — claramente não relacionados.
 _TOLERANCIA_VALOR_REVISAO_MAX = 0.50  # 50%
 
+_K_VIZINHOS_VALOR_REFERENCIA = 3  # média das até 3 parcelas confirmadas mais
+# próximas em data -- K=1 é frágil a uma parcela atípica isolada (desconto/
+# rateio pontual); K=3 suaviza sem arriscar misturar lados de um reajuste, já
+# que são as 3 mais próximas EM DATA, não 3 quaisquer. Mediana real de
+# parcelas por contrato é 8 (mín. 0, 8 contratos com <=2) -- degrada
+# graciosamente pra média de 1 ou 2 quando não há 3 disponíveis.
 
-def _match_heuristico(cabec: dict[str, Any], candidatos: list[dict[str, Any]]) -> dict[str, Any] | None:
+_MIN_PARCELAS_VALOR_REFERENCIA = 2  # ver docstring de _valor_referencia_contrato
+
+
+def _valor_referencia_contrato(
+    candidato: dict[str, Any],
+    parcelas_confirmadas: list[dict[str, Any]],
+    venc_titulo: date | None,
+) -> float:
+    """Valor de referência pra comparar um título órfão: média das até
+    `_K_VIZINHOS_VALOR_REFERENCIA` parcelas CONFIRMADAS (`vinculo="confirmado"`
+    -- nunca heurística/substituto) do próprio contrato mais próximas por
+    vencimento do título avaliado. Substitui o valor estático `nValTotMes`
+    (cadastro, pode ficar desatualizado depois de um reajuste) por um valor
+    ancorado no histórico observado do próprio contrato.
+
+    Cai pra `nValTotMes` quando há menos de `_MIN_PARCELAS_VALOR_REFERENCIA`
+    parcelas confirmadas elegíveis -- tanto pelo caso óbvio (contrato ainda
+    sem nenhuma parcela confirmada) quanto pra evitar um caso degenerado: com
+    só 1 parcela confirmada, se ela for justamente o título ATRASADO/
+    CANCELADO que `_resolver_pendencias` está tentando resolver, a "média"
+    vira o próprio valor dele -- qualquer órfão do mesmo valor bateria 0% de
+    diferença por tautologia, inclusive um que a busca de substituto (mais
+    rigorosa, checa categoria/impostos) já rejeitou por outro motivo. Com o
+    mínimo de 2 parcelas *independentes* a comparação deixa de ser circular.
+    """
+    if venc_titulo is not None:
+        elegiveis = [
+            p for p in parcelas_confirmadas
+            if _parse_data(p.get("dDtVenc")) is not None and _num(p.get("nValorTitulo"))
+        ]
+        if len(elegiveis) >= _MIN_PARCELAS_VALOR_REFERENCIA:
+            elegiveis.sort(key=lambda p: abs((_parse_data(p.get("dDtVenc")) - venc_titulo).days))
+            vizinhas = elegiveis[:_K_VIZINHOS_VALOR_REFERENCIA]
+            valores = [_num(p.get("nValorTitulo")) for p in vizinhas]
+            return sum(valores) / len(valores)
+    return _num(candidato.get("nValTotMes"))
+
+
+def _match_heuristico(
+    cabec: dict[str, Any],
+    candidatos: list[dict[str, Any]],
+    parcelas_confirmadas_por_ctr: dict[Any, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
     """Tenta religar um título sem `nCodCtr` a um contrato do cadastro do
     mesmo cliente. Só casa quando sobra **exatamente 1** candidato plausível
     depois de filtrar por:
 
-    - `nCodOS` presente — o título precisa ter nascido de uma Ordem de
-      Serviço de verdade (`cOrigem="VENR"`), a mesma origem de toda parcela
-      já confirmada (`nCodCtr` direto) de qualquer contrato. Título
-      `cOrigem="MANR"` (lançamento manual, sem OS/NF) nunca tem essa
-      procedência, mesmo com valor idêntico — achado real: título
-      `11066616943` do cliente FISERV batia o valor exato do contrato
-      (R$ 35.000) e caía dentro da vigência, mas é `MANR` sem OS, e todo o
-      resto da cobrança daquele contrato seguiu faturado normalmente pela
-      via formal (OS/NF) sem nunca referenciar esse título — ou seja, é
-      quase certo que não é uma parcela real do contrato, é um lançamento
-      avulso que só coincide em valor. Ver `sondas/PESQUISA_CONTRATOS_OS.md`,
-      seção 12. Título `MANR` plausível ainda pode entrar em
-      `titulos_para_revisao` (`_candidatos_revisao`) — só não é
-      auto-confirmado;
     - natureza "R" (contratos em `servicos/contrato` são sempre de receita —
       um título "P" do mesmo cliente é uma relação diferente, não o contrato);
-    - vencimento dentro de `dVigInicial`..`dVigFinal` do contrato;
-    - valor a até `_TOLERANCIA_VALOR_HEURISTICO` de distância de `nValTotMes`.
+    - vencimento não anterior a `dVigInicial` do contrato;
+    - valor a até `_TOLERANCIA_VALOR_HEURISTICO` de distância do valor de
+      referência do contrato (`_valor_referencia_contrato` — parcelas
+      confirmadas vizinhas em data, ou `nValTotMes` na falta delas).
 
     0 ou 2+ candidatos plausíveis => ambíguo, não casa (fica órfão mesmo).
+
+    Não exige `nCodOS` nem vencimento antes de `dVigFinal` (removidos por
+    pedido explícito — na prática a maioria dos títulos que precisam dessa
+    religação é `cOrigem="MANR"`, sem OS vinculada, e contratos renovados
+    informalmente seguem sendo cobrados depois do fim de vigência formal
+    cadastrado; exigir os dois fazia a heurística quase nunca casar nada).
+
+    Isso reabre o risco descrito em `sondas/PESQUISA_CONTRATOS_OS.md`,
+    seção 12 (caso FISERV: título `11066616943`, valor idêntico ao contrato
+    e dentro da vigência, mas lançamento avulso sem relação real com ele — o
+    resto da cobrança daquele contrato seguiu faturado normalmente pela via
+    formal, sem nunca referenciar esse título) — sem OS e sem teto de
+    vigência, valor+natureza+vencimento mínimo é a única defesa contra esse
+    tipo de coincidência. Nível de confiança de um match desta função,
+    portanto, é mais baixo que antes: ainda é o candidato mais plausível
+    entre os do mesmo cliente (exatamente 1 sobra depois do filtro de
+    valor), mas sem a confirmação formal (OS) nem o limite de prazo que
+    detectariam boa parte das coincidências como a da FISERV.
     """
     if cabec.get("cNatureza") != "R":
-        return None
-    if not cabec.get("nCodOS"):
         return None
     venc = _parse_data(cabec.get("dDtVenc"))
     valor = _num(cabec.get("nValorTitulo"))
@@ -171,60 +225,66 @@ def _match_heuristico(cabec: dict[str, Any], candidatos: list[dict[str, Any]]) -
     plausiveis = []
     for c in candidatos:
         inicio = _parse_data(c.get("dVigInicial"))
-        fim = _parse_data(c.get("dVigFinal"))
         if inicio and venc < inicio:
             continue
-        if fim and venc > fim:
+        val_ref = _valor_referencia_contrato(c, parcelas_confirmadas_por_ctr.get(c.get("nCodCtr"), []), venc)
+        if not val_ref:
             continue
-        val_mes = _num(c.get("nValTotMes"))
-        if not val_mes:
-            continue
-        if abs(valor - val_mes) / val_mes > _TOLERANCIA_VALOR_HEURISTICO:
+        if abs(valor - val_ref) / val_ref > _TOLERANCIA_VALOR_HEURISTICO:
             continue
         plausiveis.append(c)
 
     return plausiveis[0] if len(plausiveis) == 1 else None
 
 
-def _candidatos_revisao(cabec: dict[str, Any], candidatos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _candidatos_revisao(
+    cabec: dict[str, Any],
+    candidatos: list[dict[str, Any]],
+    parcelas_confirmadas_por_ctr: dict[Any, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
     """Filtra, dentre os contratos do mesmo cliente, só os plausíveis o
     bastante pro sinal de revisão manual: valor a até
-    `_TOLERANCIA_VALOR_REVISAO_MAX` de `nValTotMes`. Sem esse teto, qualquer
-    recebimento do cliente (por menor relação que tenha com o contrato)
-    acabava sinalizado — não é esse o objetivo (ver constante acima)."""
+    `_TOLERANCIA_VALOR_REVISAO_MAX` do valor de referência do contrato (ver
+    `_valor_referencia_contrato`). Sem esse teto, qualquer recebimento do
+    cliente (por menor relação que tenha com o contrato) acabava sinalizado
+    — não é esse o objetivo (ver constante acima)."""
     valor = _num(cabec.get("nValorTitulo"))
     if not valor:
         return []
+    venc = _parse_data(cabec.get("dDtVenc"))
     plausiveis = []
     for c in candidatos:
-        val_mes = _num(c.get("nValTotMes"))
-        if not val_mes:
+        val_ref = _valor_referencia_contrato(c, parcelas_confirmadas_por_ctr.get(c.get("nCodCtr"), []), venc)
+        if not val_ref:
             continue
-        if abs(valor - val_mes) / val_mes <= _TOLERANCIA_VALOR_REVISAO_MAX:
+        if abs(valor - val_ref) / val_ref <= _TOLERANCIA_VALOR_REVISAO_MAX:
             plausiveis.append(c)
     return plausiveis
 
 
-def _revisao_motivo(cabec: dict[str, Any], candidato: dict[str, Any]) -> str:
+def _revisao_motivo(
+    cabec: dict[str, Any],
+    candidato: dict[str, Any],
+    parcelas_confirmadas_por_ctr: dict[Any, list[dict[str, Any]]],
+) -> str:
     """Explica, em texto simples, por que um título do mesmo cliente de
     `candidato` não foi religado automaticamente por `_match_heuristico` —
-    orienta o que o usuário precisa checar antes de aprovar o vínculo."""
+    orienta o que o usuário precisa checar antes de aprovar o vínculo.
+    `_match_heuristico` não exige mais `nCodOS` nem vencimento antes de
+    `dVigFinal` (ver docstring), então essas duas razões saíram daqui — só
+    sobra o que continua sendo critério de fato: vencimento antes do início
+    da vigência, valor fora da tolerância, ou ambiguidade."""
     motivos = []
-    if not cabec.get("nCodOS"):
-        motivos.append("lançado sem Ordem de Serviço (não veio pela via formal de faturamento do contrato)")
     venc = _parse_data(cabec.get("dDtVenc"))
     inicio = _parse_data(candidato.get("dVigInicial"))
-    fim = _parse_data(candidato.get("dVigFinal"))
     if venc and inicio and venc < inicio:
         motivos.append("vencimento antes do início da vigência do contrato")
-    if venc and fim and venc > fim:
-        motivos.append("vencimento depois do fim da vigência do contrato")
     valor = _num(cabec.get("nValorTitulo"))
-    val_mes = _num(candidato.get("nValTotMes"))
-    if valor and val_mes:
-        diff_pct = abs(valor - val_mes) / val_mes * 100
+    val_ref = _valor_referencia_contrato(candidato, parcelas_confirmadas_por_ctr.get(candidato.get("nCodCtr"), []), venc)
+    if valor and val_ref:
+        diff_pct = abs(valor - val_ref) / val_ref * 100
         if diff_pct > _TOLERANCIA_VALOR_HEURISTICO * 100:
-            motivos.append(f"valor {diff_pct:.1f}% diferente do valor mensal cadastrado do contrato")
+            motivos.append(f"valor {diff_pct:.1f}% diferente do valor de referência do contrato")
     if not motivos:
         motivos.append("mais de um contrato do mesmo cliente é compatível com este título — ambíguo")
     return "; ".join(motivos)
@@ -390,6 +450,25 @@ def _substituto_e_confiavel(cabec_cancelado: dict[str, Any], cabec_candidato: di
 # o pedido do usuário foi especificamente sobre atrasos "superior a 60 dias".
 _DIAS_ATRASO_MINIMO_BUSCA = 60
 
+# Janela de dias entre o vencimento do título atrasado e o lançamento do
+# candidato a pagamento avulso — mesma ideia de `_JANELA_DIAS_SUBSTITUTO_CANCELADO`,
+# mas deliberadamente mais larga: uma parcela cancelada tende a ser resolvida
+# rápido, enquanto um título atrasado (por definição, já em aberto há pelo
+# menos `_DIAS_ATRASO_MINIMO_BUSCA` dias) pode levar bem mais tempo até
+# alguém notar e reconciliar manualmente o pagamento avulso. Único caso real
+# validado até agora (CERENSA, ver PESQUISA_CONTRATOS_OS.md seção 15) ficou a
+# 31 dias de distância — 90 dá folga generosa sobre isso sem abrir a ponto de
+# pegar lançamentos de meses muito distantes que só coincidem em valor.
+_JANELA_DIAS_PAGAMENTO_ATRASADO = 90
+
+# Faixa de valor pro pagamento avulso quando não há correspondência exata do
+# líquido — mesma faixa e mesma razão de `_FAIXA_VALOR_SUBSTITUTO_*`: multa,
+# desconto, tarifa bancária ou um pagamento parcial/combinado (duas parcelas
+# quitadas numa única transferência) mudam o valor final recebido em relação
+# ao líquido teórico do título atrasado.
+_FAIXA_VALOR_PAGAMENTO_ATRASADO_MIN = 0.5
+_FAIXA_VALOR_PAGAMENTO_ATRASADO_MAX = 3.0
+
 
 def _categoria_dre_elegivel(categoria_map: dict[str, dict[str, str]], cod_categ: str) -> bool:
     """Uma categoria é elegível pro DRE quando não está marcada como
@@ -418,26 +497,37 @@ def _buscar_pagamento_atrasado(
     cabec_atrasado: dict[str, Any],
     titulos_candidatos: list[dict[str, Any]],
     hoje: date,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any], bool] | None:
     """Título `ATRASADO` há mais de `_DIAS_ATRASO_MINIMO_BUSCA` dias pode já
     ter sido pago de fato via um lançamento avulso nunca religado ao título
     original — a baixa de uma transferência bancária, por exemplo, não fica
     automaticamente vinculada ao título em aberto que ela quita.
 
-    Candidato: mesmo cliente, mesma natureza, não cancelado, lançado
+    Candidato: `cOrigem="MANR"` (lançamento manual — mesma exigência de
+    `_buscar_substituto_cancelado`/`_match_heuristico`: uma nota fiscal
+    formal do mesmo cliente é outra cobrança de verdade, não uma
+    reconciliação avulsa), mesma natureza, não cancelado, lançado
     (`dDtEmissao`, ou `dDtVenc` se não houver emissão) **depois** do
-    vencimento do título atrasado — e cujo valor bruto bate com o valor
-    **líquido** do atrasado (`_valor_liquido`): uma transferência bancária
-    tipicamente não traz quebra de imposto nenhuma no título (o valor
-    lançado já é o que de fato circulou, sem retenção separada), então
-    comparar contra o bruto do atrasado erraria por causa da retenção que
-    só existe do lado do título formal.
+    vencimento do título atrasado e a até `_JANELA_DIAS_PAGAMENTO_ATRASADO`
+    dias dessa data.
 
-    Só resolve com **exatamente 1** candidato — ambíguo não escolhe. Nunca
-    promove automaticamente (só sinaliza, ver `montar_contratos`): diferente
-    de uma parcela cancelada, um título atrasado pode genuinamente seguir em
-    aberto — "achei um valor parecido lançado depois" é uma evidência mais
-    fraca que "a parcela foi formalmente cancelada e apareceu um substituto".
+    Comparação de valor em dois níveis, igual a `_buscar_substituto_cancelado`:
+    primeiro tenta o valor bruto do candidato batendo com o valor **líquido**
+    do atrasado (`_valor_liquido`) a até 1 centavo — uma transferência
+    bancária tipicamente não traz quebra de imposto nenhuma no título, então
+    comparar contra o bruto do atrasado erraria por causa da retenção que só
+    existe do lado do título formal; só se não achar nenhum exato tenta a
+    faixa [`_FAIXA_VALOR_PAGAMENTO_ATRASADO_MIN`x,
+    `_FAIXA_VALOR_PAGAMENTO_ATRASADO_MAX`x] do líquido (acomoda multa,
+    desconto, tarifa ou pagamento parcial/combinado). Em cada nível, só
+    resolve com **exatamente 1** candidato — ambíguo (0 ou 2+) não escolhe.
+
+    Devolve `(cabec_candidato, achou_por_valor_exato)`. Nunca promove
+    automaticamente (só sinaliza, ver `montar_contratos`), nem por valor
+    exato: diferente de uma parcela cancelada, um título atrasado pode
+    genuinamente seguir em aberto — "achei um valor parecido lançado depois"
+    é uma evidência mais fraca que "a parcela foi formalmente cancelada e
+    apareceu um substituto".
     """
     venc_atrasado = _parse_data(cabec_atrasado.get("dDtVenc"))
     if venc_atrasado is None:
@@ -448,9 +538,11 @@ def _buscar_pagamento_atrasado(
     if not valor_liquido_atrasado:
         return None
 
-    candidatos = []
+    na_janela: list[dict[str, Any]] = []
     for titulo in titulos_candidatos:
         cabec = titulo.get("cabecTitulo", {}) or {}
+        if cabec.get("cOrigem") != "MANR":
+            continue
         if cabec.get("cNatureza") != cabec_atrasado.get("cNatureza"):
             continue
         if cabec.get("cStatus") == "CANCELADO":
@@ -458,12 +550,21 @@ def _buscar_pagamento_atrasado(
         data_lancamento = _parse_data(cabec.get("dDtEmissao")) or _parse_data(cabec.get("dDtVenc"))
         if data_lancamento is None or data_lancamento <= venc_atrasado:
             continue
-        valor_candidato = _num(cabec.get("nValorTitulo")) or 0.0
-        if abs(valor_candidato - valor_liquido_atrasado) >= 0.01:
+        if (data_lancamento - venc_atrasado).days > _JANELA_DIAS_PAGAMENTO_ATRASADO:
             continue
-        candidatos.append(cabec)
+        na_janela.append(cabec)
 
-    return candidatos[0] if len(candidatos) == 1 else None
+    def _valor(cabec: dict[str, Any]) -> float:
+        return _num(cabec.get("nValorTitulo")) or 0.0
+
+    exatos = [c for c in na_janela if abs(_valor(c) - valor_liquido_atrasado) < 0.01]
+    if exatos:
+        return (exatos[0], True) if len(exatos) == 1 else None
+
+    minimo = valor_liquido_atrasado * _FAIXA_VALOR_PAGAMENTO_ATRASADO_MIN
+    maximo = valor_liquido_atrasado * _FAIXA_VALOR_PAGAMENTO_ATRASADO_MAX
+    na_faixa = [c for c in na_janela if minimo <= _valor(c) <= maximo]
+    return (na_faixa[0], False) if len(na_faixa) == 1 else None
 
 
 def montar_contratos(
@@ -485,12 +586,12 @@ def montar_contratos(
     - todo contrato cadastrado entra no resultado, mesmo sem nenhum título
       casado (parcelas=[], status vem do cadastro — veja `status_cadastro`);
     - títulos sem `nCodCtr` passam por `_match_heuristico` antes de serem
-      descartados, religando ao contrato certo quando não há ambiguidade E o
-      título tem `nCodOS` (nasceu de uma Ordem de Serviço real — mesma
-      procedência de qualquer parcela já confirmada; título lançado manual,
-      sem OS, nunca é auto-ligado mesmo com valor idêntico, ver
-      `_match_heuristico`) — marcados com `"vinculo": "heuristico"` em vez de
-      `"confirmado"`;
+      descartados, religando ao contrato certo do mesmo cliente quando não
+      há ambiguidade (natureza receita, vencimento não anterior à vigência
+      inicial, valor a até `_TOLERANCIA_VALOR_HEURISTICO` do valor de
+      referência do contrato — ver `_match_heuristico`/
+      `_valor_referencia_contrato`) — marcados com `"vinculo": "heuristico"` em
+      vez de `"confirmado"`;
     - parcela **já vinculada** (confirmada ou heurística) que aparece
       `CANCELADO` passa por `_buscar_substituto_cancelado`: se achar um
       lançamento manual plausível e inequívoco do mesmo cliente (mesmo valor,
@@ -505,18 +606,24 @@ def montar_contratos(
       provavelmente cobre — sem contar em nada até aprovação manual;
     - parcela **já vinculada** com situação `ATRASADO` há mais de
       `_DIAS_ATRASO_MINIMO_BUSCA` (60) dias passa por
-      `_buscar_pagamento_atrasado`: procura um lançamento avulso do mesmo
-      cliente, lançado depois do vencimento, cujo valor bruto bata com o
-      valor **líquido** do atrasado (bruto menos impostos efetivamente
-      retidos — uma transferência bancária tipicamente não traz quebra de
-      imposto no título). Só sinaliza (`titulos_para_revisao`, com a
-      categoria do atrasado marcada como elegível ou não pro DRE no motivo)
-      — **nunca promove**: um título atrasado pode genuinamente seguir em
-      aberto, então essa evidência é mais fraca que a de um cancelamento;
+      `_buscar_pagamento_atrasado`: procura um lançamento manual
+      (`cOrigem="MANR"`) do mesmo cliente, lançado depois do vencimento e a
+      até `_JANELA_DIAS_PAGAMENTO_ATRASADO` dias dessa data, cujo valor
+      bruto bata com o valor **líquido** do atrasado (bruto menos impostos
+      efetivamente retidos — uma transferência bancária tipicamente não
+      traz quebra de imposto no título) — ou, sem match exato, dentro da
+      faixa [`_FAIXA_VALOR_PAGAMENTO_ATRASADO_MIN`x,
+      `_FAIXA_VALOR_PAGAMENTO_ATRASADO_MAX`x] desse líquido. Só sinaliza
+      (`titulos_para_revisao`, com o motivo dizendo se o valor bateu exato
+      ou só na faixa, se a categoria e os impostos retidos do candidato
+      batem com os do atrasado, e se a categoria do atrasado é elegível pro
+      DRE) — **nunca promove**, nem por valor exato: um título atrasado pode
+      genuinamente seguir em aberto, então essa evidência é mais fraca que a
+      de um cancelamento;
     - o que sobrar (nem auto-ligado, nem usado como substituto) mas ainda é
       plausível (mesmo cliente de algum contrato cadastrado, valor a até
-      `_TOLERANCIA_VALOR_REVISAO_MAX` do valor mensal) entra em
-      `"titulos_para_revisao"` desse(s) contrato(s) — não conta em
+      `_TOLERANCIA_VALOR_REVISAO_MAX` do valor de referência do contrato)
+      entra em `"titulos_para_revisao"` desse(s) contrato(s) — não conta em
       `resumo`/`status_contrato`/`valor_recorrente`, é só um sinal pra
       avaliação manual. Um título do mesmo cliente com valor muito distante
       não é um "quase bateu", é outra cobrança sem relação — não entra nem
@@ -546,59 +653,61 @@ def montar_contratos(
             orfaos.append(titulo)
 
     titulos_revisao_por_ctr: dict[Any, list[dict[str, Any]]] = {}
-
-    # Passo 1: tenta auto-ligar cada órfão não cancelado (ver
-    # _match_heuristico). O que sobrar (não ligado) fica disponível como pool
-    # de candidatos pros dois passos seguintes.
-    orfaos_nao_ligados: list[dict[str, Any]] = []
-    for titulo in orfaos:
-        cabec = titulo.get("cabecTitulo", {}) or {}
-        if cabec.get("cStatus") == "CANCELADO":
-            # Cancelado nao representa pagamento nem pendencia real -- nao
-            # ajuda a decidir nada, nem auto-liga nem sinaliza pra revisao,
-            # nem serve de candidato a substituto de outra coisa.
-            continue
-        candidatos = candidatos_por_cliente.get(cabec.get("nCodCliente"), [])
-        alvo = _match_heuristico(cabec, candidatos)
-        if alvo is not None:
-            grupos.setdefault(alvo["nCodCtr"], []).append((titulo, "heuristico"))
-        else:
-            orfaos_nao_ligados.append(titulo)
-
-    # Passo 2: pra cada parcela JÁ VINCULADA (confirmada ou religada) que
-    # precisa de reconciliação, procura um candidato entre os órfãos ainda
-    # não ligados do mesmo cliente. Dois casos:
-    #
-    # - CANCELADO: pode ter sido substituído por um lançamento avulso (ver
-    #   _buscar_substituto_cancelado). Candidato forte o bastante (valor
-    #   exato + já pago + categoria e impostos batendo — ver
-    #   _substituto_e_confiavel) é promovido direto como parcela paga.
-    # - ATRASADO há mais de _DIAS_ATRASO_MINIMO_BUSCA dias: pode já ter sido
-    #   pago via um lançamento avulso nunca religado (ver
-    #   _buscar_pagamento_atrasado) — comparando o valor LÍQUIDO do atrasado
-    #   contra o bruto do candidato. Nunca promove (evidência mais fraca que
-    #   o caso de cancelamento — um atrasado pode genuinamente seguir em
-    #   aberto), só sinaliza.
-    #
-    # Cada órfão só pode ser sugerido pra uma parcela — uma vez usado, sai
-    # do pool pra não ser sugerido de novo (nem pra outra parcela aqui, nem
-    # pro sinal genérico do passo 3).
     substitutos_por_titulo: dict[Any, dict[str, Any]] = {}
-    titulos_consumidos_como_substituto: set[Any] = set()
-    for cod_ctr, titulos_do_contrato in grupos.items():
+
+    # Pool compartilhado de candidatos: todo órfão não cancelado, disponível
+    # tanto pra religação heurística (Passo 1) quanto pra busca de
+    # substituto/pagamento avulso (Passo 2). Cancelado não representa
+    # pagamento nem pendência real -- não ajuda a decidir nada, nem auto-liga
+    # nem sinaliza pra revisão, nem serve de candidato a nada.
+    candidatos_pool: list[dict[str, Any]] = [
+        t for t in orfaos if (t.get("cabecTitulo") or {}).get("cStatus") != "CANCELADO"
+    ]
+    # "Consumido" cobre os dois jeitos de um órfão sair do pool: religado por
+    # heurística (Passo 1) ou usado como substituto/pagamento avulso (Passo
+    # 2) -- uma vez usado de qualquer um dos dois jeitos, não pode ser
+    # sugerido de novo (nem pro outro passo, nem pro sinal genérico do
+    # passo 3).
+    titulos_consumidos: set[Any] = set()
+
+    def _candidatos_disponiveis(cod_cliente: Any) -> list[dict[str, Any]]:
+        return [
+            t for t in candidatos_pool
+            if (t.get("cabecTitulo") or {}).get("nCodCliente") == cod_cliente
+            and (t.get("cabecTitulo") or {}).get("nCodTitulo") not in titulos_consumidos
+        ]
+
+    def _resolver_pendencias(
+        cod_ctr: Any, titulos_a_checar: list[tuple[dict[str, Any], str]]
+    ) -> list[tuple[dict[str, Any], str]]:
+        """Pra cada parcela CANCELADO/ATRASADO em `titulos_a_checar`, procura
+        um candidato a substituto/pagamento avulso entre os órfãos do mesmo
+        cliente ainda disponíveis (ver `_candidatos_disponiveis`). Dois casos:
+
+        - CANCELADO: pode ter sido substituído por um lançamento avulso (ver
+          `_buscar_substituto_cancelado`). Candidato forte o bastante (valor
+          exato + já pago + categoria e impostos batendo — ver
+          `_substituto_e_confiavel`) é promovido direto como parcela paga.
+        - ATRASADO há mais de `_DIAS_ATRASO_MINIMO_BUSCA` dias: pode já ter
+          sido pago via um lançamento avulso nunca religado (ver
+          `_buscar_pagamento_atrasado`) — comparando o valor LÍQUIDO do
+          atrasado contra o bruto do candidato. Nunca promove (evidência
+          mais fraca que o caso de cancelamento — um atrasado pode
+          genuinamente seguir em aberto), só sinaliza.
+
+        Devolve as parcelas promovidas (substituto confiável) pra quem chama
+        anexar ao grupo do contrato. Chamada duas vezes por `montar_contratos`
+        — antes e depois do Passo 1 (religação heurística) — ver nota de
+        prioridade lá.
+        """
         contrato_cad = contratos_cadastro.get(cod_ctr)
         promovidos: list[tuple[dict[str, Any], str]] = []
-        for titulo, _vinculo in titulos_do_contrato:
+        for titulo, _vinculo in titulos_a_checar:
             cabec = titulo.get("cabecTitulo", {}) or {}
             status = cabec.get("cStatus")
             if status not in ("CANCELADO", "ATRASADO"):
                 continue
-            cod_cliente_ctr = cabec.get("nCodCliente")
-            candidatos_orfaos = [
-                t for t in orfaos_nao_ligados
-                if (t.get("cabecTitulo") or {}).get("nCodCliente") == cod_cliente_ctr
-                and (t.get("cabecTitulo") or {}).get("nCodTitulo") not in titulos_consumidos_como_substituto
-            ]
+            candidatos_orfaos = _candidatos_disponiveis(cabec.get("nCodCliente"))
 
             if status == "CANCELADO":
                 achado = _buscar_substituto_cancelado(cabec, candidatos_orfaos, contrato_cad)
@@ -606,7 +715,7 @@ def montar_contratos(
                     continue
                 titulo_substituto, achou_exato = achado
                 cabec_substituto = titulo_substituto.get("cabecTitulo", {}) or {}
-                titulos_consumidos_como_substituto.add(cabec_substituto.get("nCodTitulo"))
+                titulos_consumidos.add(cabec_substituto.get("nCodTitulo"))
 
                 promovido = achou_exato and _substituto_e_confiavel(cabec, cabec_substituto)
                 if promovido:
@@ -622,8 +731,10 @@ def montar_contratos(
                     titulos_revisao_por_ctr.setdefault(cod_ctr, []).append({
                         "nCodTitulo": cabec_substituto.get("nCodTitulo"),
                         "vencimento": cabec_substituto.get("dDtVenc"),
+                        "pagamento": cabec_substituto.get("dDtPagamento") or None,
                         "valor": _num(cabec_substituto.get("nValorTitulo")),
                         "status_omie": cabec_substituto.get("cStatus"),
+                        "situacao": _situacao_parcela(cabec_substituto),
                         "motivo": (
                             f"possível substituto da parcela cancelada {cabec.get('nCodTitulo')} "
                             f"(mesmo cliente, lançamento manual próximo em data/valor)"
@@ -636,26 +747,86 @@ def montar_contratos(
                 substitutos_por_titulo[cabec.get("nCodTitulo")] = {"cabec": cabec_substituto, "promovido": promovido}
 
             else:  # ATRASADO há mais de _DIAS_ATRASO_MINIMO_BUSCA dias
-                cabec_pagamento = _buscar_pagamento_atrasado(cabec, candidatos_orfaos, hoje)
-                if cabec_pagamento is None:
+                achado = _buscar_pagamento_atrasado(cabec, candidatos_orfaos, hoje)
+                if achado is None:
                     continue
-                titulos_consumidos_como_substituto.add(cabec_pagamento.get("nCodTitulo"))
+                cabec_pagamento, achou_exato = achado
+                titulos_consumidos.add(cabec_pagamento.get("nCodTitulo"))
                 dre_elegivel = _categoria_dre_elegivel(categoria_map, cabec.get("cCodCateg", ""))
+                categoria_bate = _categoria_compativel(cabec, cabec_pagamento)
+                impostos_batem = _impostos_compativeis(cabec, cabec_pagamento)
+                motivo_valor = (
+                    "valor bate exatamente com o líquido do título atrasado"
+                    if achou_exato
+                    else (
+                        f"valor dentro da faixa {_FAIXA_VALOR_PAGAMENTO_ATRASADO_MIN:.1f}x–"
+                        f"{_FAIXA_VALOR_PAGAMENTO_ATRASADO_MAX:.1f}x do líquido do título atrasado, sem bater exato"
+                    )
+                )
                 titulos_revisao_por_ctr.setdefault(cod_ctr, []).append({
                     "nCodTitulo": cabec_pagamento.get("nCodTitulo"),
                     "vencimento": cabec_pagamento.get("dDtVenc"),
+                    "pagamento": cabec_pagamento.get("dDtPagamento") or None,
                     "valor": _num(cabec_pagamento.get("nValorTitulo")),
                     "status_omie": cabec_pagamento.get("cStatus"),
+                    "situacao": _situacao_parcela(cabec_pagamento),
                     "motivo": (
                         f"possível pagamento avulso do título atrasado há mais de "
-                        f"{_DIAS_ATRASO_MINIMO_BUSCA} dias {cabec.get('nCodTitulo')} (valor bate com o líquido "
-                        f"do título atrasado; categoria do título atrasado "
-                        f"{'é' if dre_elegivel else 'não é'} destinada ao DRE)"
+                        f"{_DIAS_ATRASO_MINIMO_BUSCA} dias {cabec.get('nCodTitulo')} ({motivo_valor}; "
+                        f"categoria {'bate' if categoria_bate else 'não bate'} com a do atrasado; "
+                        f"impostos retidos {'batem' if impostos_batem else 'não batem'}; "
+                        f"categoria do título atrasado {'é' if dre_elegivel else 'não é'} destinada ao DRE)"
                     ),
                 })
                 # Nunca promove -- so sinaliza (ver _buscar_pagamento_atrasado).
                 substitutos_por_titulo[cabec.get("nCodTitulo")] = {"cabec": cabec_pagamento, "promovido": False}
-        titulos_do_contrato.extend(promovidos)
+        return promovidos
+
+    # Passo 2a: resolve primeiro as pendências (CANCELADO/ATRASADO) das
+    # parcelas JÁ CONFIRMADAS (nCodCtr direto) -- antes do Passo 1
+    # (religação heurística genérica) ter chance de reivindicar candidatos
+    # do mesmo pool. Prioridade explícita, por pedido do usuário: a busca de
+    # substituto/pagamento avulso tem checagens mais rigorosas (categoria,
+    # impostos, status pago) do que `_match_heuristico`, que só olha
+    # natureza + vigência inicial + valor — um candidato que serviria pros
+    # dois não deve ser capturado pelo mais permissivo primeiro.
+    for cod_ctr, titulos_do_contrato in grupos.items():
+        titulos_do_contrato.extend(_resolver_pendencias(cod_ctr, titulos_do_contrato))
+
+    # Snapshot de parcelas CONFIRMADAS por contrato, congelado ANTES do
+    # Passo 1 rodar -- ver _valor_referencia_contrato. Fixo neste ponto de
+    # propósito: religar um órfão usando o valor de outro órfão religado
+    # momentos antes na mesma passada tornaria o resultado dependente da
+    # ordem de candidatos_pool (ordem de paginação da API, não cronológica)
+    # -- inaceitável numa reconciliação que precisa ser auditável.
+    parcelas_confirmadas_por_ctr: dict[Any, list[dict[str, Any]]] = {
+        cod_ctr: [(t.get("cabecTitulo") or {}) for t, vinculo in titulos_do_contrato if vinculo == "confirmado"]
+        for cod_ctr, titulos_do_contrato in grupos.items()
+    }
+
+    # Passo 1: tenta auto-ligar cada órfão ainda não consumido pelo passo 2a
+    # (ver _match_heuristico). O que sobrar (não ligado) fica disponível como
+    # pool de candidatos pro passo 3.
+    orfaos_nao_ligados: list[dict[str, Any]] = []
+    for titulo in candidatos_pool:
+        cabec = titulo.get("cabecTitulo", {}) or {}
+        if cabec.get("nCodTitulo") in titulos_consumidos:
+            continue
+        candidatos = candidatos_por_cliente.get(cabec.get("nCodCliente"), [])
+        alvo = _match_heuristico(cabec, candidatos, parcelas_confirmadas_por_ctr)
+        if alvo is not None:
+            titulos_consumidos.add(cabec.get("nCodTitulo"))
+            grupos.setdefault(alvo["nCodCtr"], []).append((titulo, "heuristico"))
+        else:
+            orfaos_nao_ligados.append(titulo)
+
+    # Passo 2b: mesma resolução de pendências do passo 2a, agora só pras
+    # parcelas CANCELADO/ATRASADO que passaram a existir no grupo por causa
+    # do Passo 1 (religadas por heurística) -- as confirmadas já foram
+    # tratadas no 2a, antes do Passo 1 rodar.
+    for cod_ctr, titulos_do_contrato in grupos.items():
+        novos = [par for par in titulos_do_contrato if par[1] == "heuristico"]
+        titulos_do_contrato.extend(_resolver_pendencias(cod_ctr, novos))
 
     # Passo 3: o que sobrar (nem auto-ligado, nem usado como substituto) mas
     # ainda tem cara de contrato (mesmo cliente de um contrato cadastrado,
@@ -663,17 +834,19 @@ def montar_contratos(
     # _TOLERANCIA_VALOR_REVISAO_MAX.
     for titulo in orfaos_nao_ligados:
         cabec = titulo.get("cabecTitulo", {}) or {}
-        if cabec.get("nCodTitulo") in titulos_consumidos_como_substituto:
+        if cabec.get("nCodTitulo") in titulos_consumidos:
             continue
         candidatos = candidatos_por_cliente.get(cabec.get("nCodCliente"), [])
-        plausiveis = _candidatos_revisao(cabec, candidatos)
+        plausiveis = _candidatos_revisao(cabec, candidatos, parcelas_confirmadas_por_ctr)
         for candidato in plausiveis:
             titulos_revisao_por_ctr.setdefault(candidato["nCodCtr"], []).append({
                 "nCodTitulo": cabec.get("nCodTitulo"),
                 "vencimento": cabec.get("dDtVenc"),
+                "pagamento": cabec.get("dDtPagamento") or None,
                 "valor": _num(cabec.get("nValorTitulo")),
                 "status_omie": cabec.get("cStatus"),
-                "motivo": _revisao_motivo(cabec, candidato),
+                "situacao": _situacao_parcela(cabec),
+                "motivo": _revisao_motivo(cabec, candidato, parcelas_confirmadas_por_ctr),
             })
 
     # Todo contrato do cadastro entra no resultado, mesmo sem nenhum título
