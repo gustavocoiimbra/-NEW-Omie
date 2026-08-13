@@ -236,6 +236,195 @@ das janelas anteriores). `--data-inicio`/`--data-fim` continuam disponíveis par
 (relatório mais rápido) — `main_dashboard.py` agora **valida e recusa** passar só um dos dois, com uma mensagem
 de erro explicando por quê (em vez de silenciosamente devolver zero previsões).
 
+## 11. Sinal de revisão manual — e um teto de plausibilidade que faltava
+
+Pedido do usuário: títulos que "têm características de contrato" mas não passam em `_match_heuristico` não devem
+ser descartados em silêncio — devem virar um sinal explícito pra avaliação manual (`titulos_para_revisao`),
+nunca mesclados automaticamente. Junto, títulos `CANCELADO` (não representam pagamento nem pendência real)
+foram excluídos de toda essa reconciliação — nem auto-ligação, nem sinal de revisão.
+
+**Primeira implementação tinha um buraco real**: o critério pra entrar em `titulos_para_revisao` era só "mesmo
+cliente de um contrato cadastrado" — sem nenhum teto de plausibilidade de valor. Rodando contra a conta real,
+isso gerou **103 títulos sinalizados**, muito mais do que os 2-3 casos genuínos encontrados manualmente antes.
+Investigando o cliente PODPAH PRODUÇÕES (contrato de R$ 15.000/mês) como exemplo: um título de R$ 30.000
+(100% de diferença) e outro de R$ 1.950 (87% de diferença) estavam sendo sinalizados como "talvez pertençam" a
+esse contrato — não são "quase uma correspondência", são outra cobrança do mesmo cliente sem relação nenhuma
+com este contrato especificamente. A distribuição real das 103 diferenças de valor confirmou o padrão: 18
+estavam a até 10% (os casos genuínos), só mais 5 entre 10-30%, e o resto (majoritário) passava de 75% — alguns
+acima de 1000%.
+
+**Corrigido**: `_candidatos_revisao()` (novo) exige valor a até `_TOLERANCIA_VALOR_REVISAO_MAX` (50%, calibrado
+pela distribuição real acima — captura os casos genuínos tipo CERENSA/PLUGIN a 6.1-6.2% com folga, sem deixar
+passar swings de 100%+ que são claramente outra transação) de distância do valor mensal cadastrado do contrato.
+Resultado após a correção: **31 títulos sinalizados** (não mais 103); PODPAH — o exemplo que motivou a
+investigação — passou a ter **zero** títulos sinalizados, corretamente (nenhum título órfão dele tem valor
+plausível pra esse contrato específico).
+
+## 12. `_match_heuristico` religava título sem Ordem de Serviço — e um dos "casos de calibração" da seção 6 era o exemplo errado
+
+Pergunta do usuário: por que o título `11066616943` (cliente FISERV, contrato `2024/00013`) foi religado
+automaticamente ("Em atraso") se não existe nenhum registro formal ligando ele ao contrato, e o resto da
+cobrança desse contrato sempre seguiu faturado normalmente (sem nunca precisar desse título)?
+
+Investigando o próprio título: `cOrigem: "MANR"` (lançamento manual — o mesmo padrão de "conciliação bancária
+manual" já visto na seção 6), **sem `nCodOS`**, `cTipo: "99999"` (tipo genérico, não é nota fiscal de verdade).
+Todos os outros 26 títulos desse mesmo contrato têm `cOrigem: "VENR"` com uma Ordem de Serviço e NF reais por
+trás. Ou seja: esse título nunca nasceu do fluxo formal de faturamento do contrato — é quase certo que é um
+lançamento avulso/errado que só coincide em valor (R$ 35.000, idêntico ao valor mensal) e caiu dentro da
+vigência, exatamente os dois critérios que `_match_heuristico` checava.
+
+**Isso expõe um erro na própria calibração original da seção 6**: eu tinha citado esse título como um dos "2
+casos genuínos" que motivaram os critérios de valor/vigência — mas nunca verifiquei a procedência (`cOrigem`/
+`nCodOS`) dele, só valor e data. Rodando a mesma checagem contra as 40 parcelas heurísticas então religadas em
+produção: **11 delas (27.5%) eram `MANR` sem `nCodOS`** — todas potencialmente do mesmo tipo de falso-positivo.
+
+**Corrigido**: `_match_heuristico` agora exige `nCodOS` presente — só religa automaticamente um título que
+nasceu de uma Ordem de Serviço real, a mesma procedência de qualquer parcela já confirmada via `nCodCtr` direto.
+Título `MANR` sem OS nunca mais é auto-ligado, **mesmo com valor idêntico** — mas continua elegível pro sinal de
+revisão manual (`_candidatos_revisao`, seção 11), com o motivo agora explicando especificamente "lançado sem
+Ordem de Serviço" quando for esse o caso. Resultado contra a conta real: heurística confirmada caiu de 40 para
+29 parcelas; sinal de revisão subiu de 31 para 42 (as 11 que perderam a auto-ligação); FISERV (`2024/00013`)
+saiu da lista de "Em atraso" — o contrato nunca teve de fato uma pendência real, era só esse lançamento avulso
+inflando o status.
+
+## 13. Busca de substituto para parcela cancelada já vinculada
+
+Pedido do usuário: quando uma parcela **já vinculada** a um contrato aparece `CANCELADO`, procurar entre os
+títulos órfãos do mesmo cliente um lançamento manual (`MANR`) que seja o substituto real — a Omie não
+reformaliza esse tipo de correção (não recria o título com o mesmo `nCodCtr`), fica só um lançamento solto. Três
+regras pedidas:
+
+1. Primeiro tenta valor **exato**, dentro de um "limiar de criação do lançamento".
+2. Sem correspondência exata, tenta a faixa **[0,5x, 3x]** do valor da parcela (folga larga pra acomodar multa,
+   desconto e encargos).
+3. Não procura se o contrato já tinha encerrado antes do vencimento da parcela cancelada.
+
+**Calibração do "limiar de criação"**: testei contra o único par real confirmado nesta conversa — FISERV,
+título cancelado `11479852597` (emitido 15/01/2026) e o substituto manual `11503451412` (emitido 07/01/2026) —
+**8 dias de diferença** em `dDtEmissao`. Testei também `dDtInc` (data de inclusão no sistema) como alternativa:
+43 dias de diferença, bem mais ruidoso (provavelmente reflete quando alguém *editou* o registro depois, não
+quando ele nasceu). Fiquei com `dDtEmissao` como âncora, janela de **30 dias** (margem generosa sobre os 8 dias
+observados, sem abrir a ponto de casar lançamentos de meses diferentes só por coincidência de valor).
+
+**Implementado** em `_buscar_substituto_cancelado` (`src/contratos.py`): roda depois da religação heurística
+(passo 1) e antes do sinal de revisão genérico (passo 3) — pra cada parcela `CANCELADO` já vinculada
+(confirmada ou heurística), procura entre os órfãos ainda não consumidos do mesmo cliente:
+- filtra por `cOrigem="MANR"`, natureza "R", não cancelado, `dDtEmissao` dentro da janela de 30 dias;
+- tenta valor exato (a até 1 centavo) primeiro; só na ausência de exato tenta a faixa 0,5x–3x;
+- só resolve se sobrar **exatamente 1** candidato em alguma das duas tentativas — ambíguo não escolhe;
+- item 3 (contrato já encerrado): compara `dVigFinal` do contrato contra o vencimento da parcela cancelada,
+  antes de tudo — se o contrato já tinha acabado antes desse vencimento, nem procura.
+
+Cada órfão só pode ser o substituto de **uma** parcela — uma vez usado, sai do pool (não pode ser sugerido de
+novo pra outra parcela cancelada, nem reaproveitado pelo sinal de revisão genérico do passo 3).
+
+**Nunca mescla automaticamente** — o substituto encontrado não altera a parcela cancelada nem conta em
+`resumo`/`status_contrato`/`valor_recorrente`. A parcela cancelada ganha um campo `"substituto_sugerido"`
+(referência ao título candidato) e o próprio título candidato entra em `titulos_para_revisao` com um motivo
+específico ("possível substituto da parcela cancelada N..."), em vez do motivo genérico — mesmo padrão de
+"sinal pra avaliação manual" já usado no resto do módulo.
+
+**Validado contra a conta real**: o par FISERV que motivou a calibração (`11479852597` → `11503451412`) é
+encontrado automaticamente pela função — o `substituto_sugerido` aponta certo, e a mensagem em
+`titulos_para_revisao` cita a parcela cancelada correta. O outro cancelamento do FISERV (`11489885499`) não
+ganhou substituto sugerido — corretamente, porque o substituto real dele (`11489893179`) já é um título formal
+(`VENR`, com `nCodCtr` direto), não um órfão — já estava coberto pelo agrupamento normal, sem precisar dessa
+busca.
+
+## 14. Promoção automática do substituto confiável como parcela paga
+
+Pedido do usuário: pra lançamentos com correspondência próxima em data/valor ao título cancelado — analisando
+também impostos — fazer a **inferência automática**, ligando ao título cancelado e contando aquele lançamento
+como parcela paga (em vez de só sinalizar pra revisão). Pediu também checar se a **categoria** bate com a
+categoria do título cancelado.
+
+**Critério reforçado** (`_substituto_e_confiavel`), só aplicado quando o candidato já foi achado por **valor
+exato** (nunca pela faixa 0,5x–3x — essa faixa larga existe justamente pra casos incertos, não é forte o
+bastante pra promover sozinha):
+
+1. Candidato já **pago de fato** (`cStatus` em `RECEBIDO`/`PAGO`) — "colocar como parcela paga" só faz sentido
+   se já foi pago; um candidato "A VENCER"/"ATRASADO" continua só como sinal de revisão.
+2. **Categoria** (`cCodCateg`) do candidato igual à da parcela cancelada.
+3. **Impostos retidos** (PIS, COFINS, CSLL, IR, ISS, INSS) batendo campo a campo (tolerância de 2 centavos) —
+   corroborar por imposto é uma evidência bem mais forte que só o valor bruto, porque não é uma coincidência
+   fácil entre transações realmente diferentes (os valores dependem da alíquota da categoria E do valor da
+   nota, juntos).
+
+Quando os quatro sinais reforçam ao mesmo tempo (valor exato + pago + categoria + impostos), o candidato é
+**promovido**: entra em `parcelas` como uma parcela de verdade (`"vinculo": "substituto"`, `situacao` calculada
+normalmente a partir do próprio `cStatus`/`dDtPagamento`), contando em `resumo`/`status_contrato`/
+`valor_recorrente` como qualquer outra parcela. Faltando qualquer um dos quatro sinais, o comportamento
+anterior se mantém (sinal em `titulos_para_revisao`, nunca mesclado). A parcela cancelada nunca é alterada —
+só ganha `"substituto_sugerido"` com um campo `"promovido"` indicando qual dos dois casos aconteceu.
+
+**Validado contra a conta real**: o par FISERV (`11479852597` → `11503451412`) bate nos quatro critérios —
+mesma categoria (`1.01.99`), impostos idênticos (PIS 227,50 / COFINS 1.050 / CSLL 350 / IR 525, ISS/INSS
+ausentes dos dois lados) e status `RECEBIDO` — e foi promovido automaticamente: `11503451412` agora aparece em
+`parcelas` com `vinculo="substituto"` e `situacao="Pago com atraso"` (pago em 16/03/2026, depois do vencimento
+30/01/2026), e não aparece mais em `titulos_para_revisao`. O total de títulos sinalizados pra revisão caiu de
+45 para 35 na conta real — as diferenças foram exatamente os substitutos que passaram a ser promovidos em vez
+de só sinalizados.
+
+### 14.1. Bug encontrado pelo usuário: comparar `nValorISS` bruto sem checar `cRetISS`
+
+O par ADSMAIS (`11479852701` → `11490541632`) batia em categoria, PIS/COFINS/CSLL/IR e status `RECEBIDO`, mas
+**não foi promovido** — o `nValorISS` da cancelada era `None` (ausente) e o do substituto era `750,00`,
+reprovando na checagem de impostos. O usuário perguntou por quê e, ao investigar, apontou a causa: a Omie tem
+um campo separado (`cRetISS`) que indica se o imposto foi **de fato retido** — `nValorISS` pode vir preenchido
+com um valor de referência/calculado mesmo quando `cRetISS="N"` (não retido). Conferido nos dados reais:
+
+| | `cRetISS` | `nValorISS` |
+|---|---|---|
+| Cancelada (`11479852701`) | ausente (nunca preenchido) | ausente |
+| Substituto (`11490541632`) | `"N"` | `750,00` |
+
+O usuário esclareceu a regra: campo **ausente** e campo igual a **`"N"`** representam a mesma informação
+("não retido") — só `cRetISS="S"` confirma que o valor deve ser considerado. Esse é exatamente o mesmo padrão
+já usado em `report_builder.py::_num_retido` pro relatório DRE (validado a 99.96% em sessão anterior) — só que
+a comparação de impostos do substituto (`_impostos_compativeis`) tinha sido escrita comparando `nValorXXX` bruto
+direto, sem checar o `cRetXXX` correspondente.
+
+**Corrigido**: `_valor_retido_comparavel` (novo) zera o valor de qualquer imposto cujo `cRetXXX` não seja
+exatamente `"S"` — tanto `"N"` quanto ausente contam como zero, dos dois lados da comparação, antes de
+comparar. Conferido: os outros 10 confirmados desse mesmo contrato (ADSMAIS `2025/00022`) têm `ISS: None` em
+**100%** dos casos — o `750,00` do substituto realmente quebrava um padrão 100% consistente, mas como `cRetISS`
+diz explicitamente que não foi retido, as duas pontas concordam ("sem ISS retido") e a promoção passou a
+acontecer. Adicionados 2 testes: a regressão exata desse caso (ausente × "N" → promove) e um controle negativo
+(`cRetISS="S"` dos dois lados com valores realmente diferentes → continua bloqueando).
+
+## 15. Heurística pra títulos ATRASADO há mais de 60 dias — pagamento avulso pelo valor líquido
+
+Pedido do usuário: pra títulos em atraso há mais de 60 dias, avaliar títulos lançados **depois** procurando um
+possível pagamento avulso nunca religado. Três comparações pedidas:
+
+1. Primeiro verificar se a categoria do título atrasado está classificada pro DRE ou não;
+2. O valor pode bater diretamente com o valor a pagar/receber do atrasado, **usando o líquido**;
+3. Pode não haver impostos no candidato — transferência bancária às vezes não traz essa quebra.
+
+**`_buscar_pagamento_atrasado`** (novo): só roda pra título `ATRASADO` vinculado (confirmado ou heurístico) com
+mais de `_DIAS_ATRASO_MINIMO_BUSCA` (60) dias de atraso. Candidato: mesmo cliente, mesma natureza, não
+cancelado, lançado (`dDtEmissao`, ou `dDtVenc` se não houver emissão) **depois** do vencimento do atrasado, com
+valor bruto batendo o valor **líquido** do atrasado (`_valor_liquido` — bruto menos os impostos efetivamente
+retidos, reaproveitando `_valor_retido_comparavel` da seção 14: só desconta o que tem `cRetXXX="S"`, então um
+candidato sem quebra de imposto nenhuma naturalmente já representa "o líquido", batendo com o cálculo do lado do
+atrasado sem precisar de nenhum tratamento especial). Só resolve com exatamente 1 candidato. **Nunca promove**
+— só entra em `titulos_para_revisao`, com o motivo citando o título atrasado, os 60 dias, e se a categoria dele
+é ou não elegível pro DRE (`_categoria_dre_elegivel` — os mesmos três flags de `report_builder._dre_flag`, mas
+sem a checagem de `cStatus`, porque naquela função todo `ATRASADO` já dá "Não" só pelo status, o que não ajuda a
+diferenciar nada aqui). É deliberadamente mais conservador que o caso de cancelamento: um título atrasado pode
+genuinamente seguir em aberto, então "achei um valor parecido lançado depois" é uma evidência mais fraca do que
+"a parcela foi formalmente cancelada e apareceu um substituto".
+
+**Validado contra a conta real**: a busca encontrou o caso da CERENSA que já tinha sido investigado bem antes
+nesta conversa (seção 6) — título atrasado `11073337502` (R$ 20.259,00 bruto, PIS+COFINS+CSLL+IR retidos
+somando R$ 1.245,93) tem líquido de **R$ 19.013,07**, batendo **exato** (não uma aproximação) com o título
+`11091929798` (`MANR`, R$ 19.013,07, `RECEBIDO`, lançado 26/07/2024 — depois do vencimento 25/06/2024). Esse
+título já tinha aparecido antes com um motivo genérico ("valor 6,2% diferente do valor mensal cadastrado") —
+agora aparece com o motivo específico, matematicamente preciso, citando o título atrasado que ele provavelmente
+quita. 6 testes novos cobrindo: sinalização básica com categoria elegível DRE, atraso ≤60 dias não aciona nada,
+candidato lançado antes do vencimento não casa, cálculo do valor líquido com retenção real, categoria de
+transferência reportada corretamente como não elegível DRE, e ambiguidade (2 candidatos) não escolhe nenhum.
+
 ---
 
 ## O que foi implementado
@@ -259,9 +448,45 @@ de erro explicando por quê (em vez de silenciosamente devolver zero previsões)
 - **Não mexido, por decisão explícita**: `movimentos.py` (allow-list de `cGrupo` já correta — seção 7), e
   nenhuma chamada em lote a `ListarOS`/`ConsultarOS`/`ConsultarContaReceber` (seção 3/item 3 confirmado pelo
   usuário — custo de rate limit não se paga, os campos já vêm de graça no título).
-- **Testes**: `tests/test_contratos_offline.py` ganhou 4 casos novos — contrato cadastrado sem título casado,
-  título órfão religado por heurística, título órfão implausível permanecendo órfão, e o marcador
-  `vinculo="confirmado"` nos títulos que já vinham com `nCodCtr`. Suite completa passando.
-- **Validado contra a conta real**: 60/60 contratos agora aparecem (antes 56); 42 parcelas religadas; ADSMAIS
-  exibe o cliente certo; sem filtro de data, o `ListarMovimentos` devolve as 51 `PREVISAO_CONTRATO` existentes,
-  incluindo a de 02/08/2027 da CREDIMORAR.
+- **Sinal de revisão manual** (seção 11): `_candidatos_revisao()` + campo `"titulos_para_revisao"` por contrato —
+  títulos órfãos plausíveis (mesmo cliente, valor a até 50% do valor mensal) que não passaram em
+  `_match_heuristico` entram aqui, com `motivo` explicando a incompatibilidade; nunca contam em
+  `resumo`/`status_contrato`/`valor_recorrente`. Títulos `CANCELADO` são ignorados em toda a reconciliação
+  (nem auto-ligação, nem sinal de revisão) — não representam pagamento nem pendência real.
+- **`_match_heuristico` exige `nCodOS`** (seção 12) — título lançado manualmente (`cOrigem="MANR"`, sem Ordem
+  de Serviço) nunca é auto-ligado, mesmo com valor idêntico ao contrato; cai pro sinal de revisão em vez de
+  contar como confirmado.
+- **`_buscar_substituto_cancelado`** (seção 13) — parcela já vinculada que aparece `CANCELADO` ganha
+  `"substituto_sugerido"` quando há um lançamento manual (`MANR`) plausível do mesmo cliente por perto (valor
+  exato, ou faixa 0,5x–3x; dentro de 30 dias de `dDtEmissao`; contrato ainda não encerrado no vencimento da
+  parcela).
+- **`_substituto_e_confiavel`** (seção 14) — quando o candidato foi achado por valor exato **e** já está pago
+  **e** a categoria bate **e** os impostos retidos (PIS/COFINS/CSLL/IR/ISS/INSS) batem, é **promovido**
+  automaticamente pra dentro de `parcelas` (`"vinculo": "substituto"`, conta em
+  `resumo`/`status_contrato`/`valor_recorrente`). Faltando qualquer um desses sinais, fica só em
+  `titulos_para_revisao` (comportamento da seção 13, nunca mesclado). A parcela cancelada sempre ganha
+  `"substituto_sugerido"` com um campo `"promovido"` indicando qual dos dois casos aconteceu.
+- **Dashboard** (`painel_financeiro_template.html`): cobranças `Cancelado` somem da tabela de parcelas do
+  contrato; títulos para revisão ganharam seção própria (borda amarela, tabela com motivo) na expansão do
+  contrato, mais um badge `⚠ N p/ revisão` visível sem expandir. Corrigido também um bug pré-existente (não
+  introduzido por essa mudança) que impedia expandir qualquer linha da tabela de contratos: `nCodCtr` é number
+  no JSON mas vira string no atributo HTML `data-ctr`, e o `Set` de linhas expandidas comparava os dois tipos
+  sem normalizar — nunca batia.
+- **Dashboard, filtro de ano**: chips "Ano" (2024/2025/2026/…, detectados dos dados) na seção Contratos —
+  filtra quais contratos aparecem (têm cobrança naquele ano) e, dentro do contrato expandido, filtra as
+  cobranças e os títulos para revisão mostrados para o ano escolhido; os pills de resumo recalculam junto.
+- **Testes**: `tests/test_contratos_offline.py` ganhou 19 casos novos no total — os 7 já descritos acima, mais 8
+  cobrindo `_buscar_substituto_cancelado`/`_substituto_e_confiavel`: match exato promovido (categoria/impostos
+  batendo, já pago), match exato com categoria diferente não promovendo, match exato com status ainda não pago
+  não promovendo, substituto pela faixa 0,5x–3x nunca promovendo mesmo pago, candidato fora da janela de dias
+  caindo no sinal genérico, 2 candidatos igualmente plausíveis não escolhendo nenhum (ambíguo), decoy `VENR`
+  corretamente ignorado, e contrato já encerrado antes do vencimento bloqueando a busca. Suite completa passando.
+- **Validado contra a conta real**: 60/60 contratos aparecem (antes 56); 29 parcelas religadas por heurística
+  (exigindo `nCodOS`); 35 títulos sinalizados para revisão (103 sem teto de plausibilidade → 31 com o teto → 42
+  com as 11 que perderam a auto-ligação por falta de OS → 45 com a busca de substituto de cancelados → 35 agora,
+  com os que viraram promoção automática em vez de sinal); ADSMAIS exibe o cliente certo; sem filtro de data, o
+  `ListarMovimentos` devolve as 51 `PREVISAO_CONTRATO` existentes, incluindo a de 02/08/2027 da CREDIMORAR;
+  PODPAH (exemplo usado pra achar o bug do teto) com zero títulos para revisão; FISERV (exemplo usado pra achar
+  o bug da falta de OS) saiu da lista de contratos "Em atraso", e sua parcela cancelada `11479852597` agora tem
+  o substituto real `11503451412` **promovido automaticamente** como parcela paga (mesma categoria, impostos
+  idênticos, já recebido).
