@@ -1,13 +1,29 @@
-"""Ponto de entrada do painel de contratos: busca títulos/previsões via
-ListarMovimentos, agrupa por contrato (src/contratos.py) e grava um JSON
-pronto para alimentar o dashboard (veja dashboard/).
+"""Ponto de entrada do painel de contratos: busca o cadastro de contratos
+(ListarContratos) e os títulos/previsões (ListarMovimentos), agrupa por
+contrato (src/contratos.py) e grava um JSON pronto para alimentar o dashboard
+(veja dashboard/).
 
 Uso:
+    python main_dashboard.py
     python main_dashboard.py --data-inicio 01/02/2026 --data-fim 31/12/2026
 
 Diferente de main.py/main_movimentos.py, não gera Excel — só o JSON de
 contratos. Precisa do ListarMovimentos (não do PesquisarLancamentos) porque
-só ele retorna as previsões futuras (PREVISAO_CONTRATO).
+só ele retorna as previsões futuras (PREVISAO_CONTRATO). O cadastro
+(ListarContratos) garante que todo contrato apareça mesmo sem título casado
+na consulta — veja sondas/PESQUISA_CONTRATOS_OS.md.
+
+Por padrão **nenhum filtro de data é enviado** (`dDtVencDe`/`dDtVencAte`
+omitidos) — busca o histórico completo de títulos e todas as previsões já
+geradas, sem risco de cortar algo em silêncio. Testado contra a conta real
+(sondas/PESQUISA_CONTRATOS_OS.md, seção 10): sem nenhum filtro, o
+`ListarMovimentos` devolve `PREVISAO_CONTRATO` normalmente (51 previsões,
+mesmo resultado — na prática 1 a mais — que com filtro). A armadilha
+encontrada não é "usar filtro de data corta previsão": é que enviar
+**`dDtVencDe` sozinho, sem `dDtVencAte`**, faz a Omie devolver zero
+previsões, sem erro. `--data-inicio`/`--data-fim` continuam disponíveis
+para quem quiser um recorte menor (relatório mais rápido) — se usados,
+devem ser passados os dois juntos, nunca só um.
 """
 from __future__ import annotations
 
@@ -21,6 +37,7 @@ from datetime import date, datetime
 
 from src.config import ConfigError, carregar_config
 from src.contratos import montar_contratos
+from src.contratos_cadastro import buscar_contratos_cadastro
 from src.enrichment import build_categoria_map, build_cliente_map, build_conta_corrente_map
 from src.movimentos import buscar_movimentos
 from src.omie_client import OmieAPIError, OmieClient
@@ -47,25 +64,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--data-inicio", default=None, type=_validar_data,
-        help="Início da janela de vencimento buscada (dd/mm/aaaa). Padrão: 6 meses atrás.",
+        help=(
+            "Início da janela de vencimento buscada (dd/mm/aaaa). Padrão: sem filtro (histórico "
+            "completo). Se usado, passe também --data-fim — só um dos dois faz a Omie devolver "
+            "zero previsões (ver docstring do módulo)."
+        ),
     )
     p.add_argument(
         "--data-fim", default=None, type=_validar_data,
-        help="Fim da janela de vencimento buscada (dd/mm/aaaa). Padrão: fim do ano corrente.",
+        help="Fim da janela de vencimento buscada (dd/mm/aaaa). Padrão: sem filtro (histórico completo).",
     )
     p.add_argument("--output", default=os.path.join("output", "contratos.json"), help="Caminho do JSON de saída")
     p.add_argument("--sem-cache-disco", action="store_true", help="Desativa o cache local em disco (.cache/)")
     p.add_argument("--cache-ttl-horas", type=float, default=24.0, help="Validade (TTL) do cache local, em horas")
     p.add_argument("--env-file", default=None, help="Caminho customizado para o arquivo .env")
     return p.parse_args(argv)
-
-
-def _janela_padrao() -> tuple[str, str]:
-    hoje = date.today()
-    mes_absoluto = hoje.year * 12 + (hoje.month - 1) - 6
-    inicio = date(mes_absoluto // 12, mes_absoluto % 12 + 1, 1)
-    fim = date(hoje.year, 12, 31)
-    return inicio.strftime("%d/%m/%Y"), fim.strftime("%d/%m/%Y")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,15 +89,23 @@ def main(argv: list[str] | None = None) -> int:
 
     args = _parse_args(argv)
 
+    if bool(args.data_inicio) != bool(args.data_fim):
+        print(
+            "Erro: --data-inicio e --data-fim precisam ser usados juntos (ou nenhum dos dois). "
+            "Passar só um faz o ListarMovimentos devolver zero previsões de contrato, sem erro — "
+            "ver docstring de main_dashboard.py.",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         config = carregar_config(args.env_file)
     except ConfigError as exc:
         print(f"Erro de configuração: {exc}", file=sys.stderr)
         return 1
 
-    padrao_inicio, padrao_fim = _janela_padrao()
-    data_inicio = args.data_inicio or padrao_inicio
-    data_fim = args.data_fim or padrao_fim
+    data_inicio = args.data_inicio
+    data_fim = args.data_fim
 
     client = OmieClient(
         app_key=config.app_key, app_secret=config.app_secret, max_req_por_segundo=config.max_req_por_segundo,
@@ -93,7 +114,11 @@ def main(argv: list[str] | None = None) -> int:
     ttl_segundos = args.cache_ttl_horas * 3600
 
     try:
-        logger.info("Buscando títulos e previsões (%s a %s)...", data_inicio, data_fim)
+        logger.info("Buscando cadastro de contratos (ListarContratos)...")
+        contratos_cadastro = buscar_contratos_cadastro(client)
+        logger.info("Contratos cadastrados: %d", len(contratos_cadastro))
+
+        logger.info("Buscando títulos e previsões (%s)...", f"{data_inicio} a {data_fim}" if data_inicio else "sem filtro de data — histórico completo")
         titulos_raw = buscar_movimentos(client, data_inicio=data_inicio, data_fim=data_fim)
         logger.info("Total de registros: %d", len(titulos_raw))
 
@@ -101,8 +126,15 @@ def main(argv: list[str] | None = None) -> int:
         cc_map = build_conta_corrente_map(client, usar_cache=usar_cache_disco, ttl_segundos=ttl_segundos)
         cliente_map = build_cliente_map(client, usar_cache=usar_cache_disco, ttl_segundos=ttl_segundos)
 
-        contratos = montar_contratos(titulos_raw, categoria_map, cc_map, cliente_map)
-        logger.info("Contratos identificados (com nCodCtr): %d", len(contratos))
+        contratos = montar_contratos(titulos_raw, categoria_map, cc_map, cliente_map, contratos_cadastro)
+        sem_parcela = sum(1 for c in contratos if c["origem_status"] == "cadastro")
+        heuristicos = sum(1 for c in contratos for p in c["parcelas"] if p["vinculo"] == "heuristico")
+        revisao = sum(len(c["titulos_para_revisao"]) for c in contratos)
+        logger.info(
+            "Contratos no relatório: %d (%d sem nenhum título casado — status vem do cadastro; "
+            "%d parcelas religadas por reconciliação heurística; %d títulos sinalizados para revisão manual)",
+            len(contratos), sem_parcela, heuristicos, revisao,
+        )
 
     except OmieAPIError as exc:
         print(f"Erro na API da Omie: {exc}", file=sys.stderr)
