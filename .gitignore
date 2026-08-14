@@ -14,3 +14,7 @@ debug_raw/*.json
 *.xlsb
 *.csv
 *.xlsx
+
+# Scripts de investigação/scratch soltos fora de sondas/ (ex.: _tmp_algo.py) —
+# nunca devem ser versionados por engano num "git add -A".
+_tmp_*

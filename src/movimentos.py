@@ -31,6 +31,13 @@ confiável, o rateio de categorias foi removido também de `report_builder.py`
 (usado por `titulos.py`), para as duas fontes produzirem o mesmo resultado
 para o mesmo título — sempre uma linha por título, com `cCodCateg` como
 categoria única.
+
+O rateio *é* recuperável, só não por aqui: `financas/contapagar` ·
+`ConsultarContaPagar`, chamado título a título (`nCodTitulo`), devolve o
+array `categorias[]` corretamente preenchido — confirmado contra títulos
+reais com rateio (ex.: RECEITA FAZENDA). Não vale o custo de uma chamada
+extra por título no pipeline em lote, mas é o caminho a usar se algum dia o
+rateio for necessário (ver `sondas/sonda_reconciliacao_bdcontas.py`).
 """
 from __future__ import annotations
 

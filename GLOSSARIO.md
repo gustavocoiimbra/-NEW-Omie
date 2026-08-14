@@ -14,12 +14,16 @@ exatamente o que está implementado, não a documentação da Omie.
 | `geral/contacorrente` | `ListarContasCorrentes` | `enrichment.py` | Cadastro das contas correntes (nome do banco) |
 | `financas/pesquisartitulos` | `PesquisarLancamentos` | `titulos.py` | Títulos lançados (contas a pagar/receber) — fonte usada por `main.py` |
 | `financas/mf` | `ListarMovimentos` | `movimentos.py` (e, por consequência, `contratos.py`) | Títulos lançados **+ previsões futuras de contrato** — fonte usada por `main_movimentos.py` e `main_dashboard.py` |
+| `servicos/contrato` | `ListarContratos` | `contratos_cadastro.py` | Cadastro mestre de contratos (cliente, vigência, valor mensal, status do cadastro) — catálogo completo, inclusive contratos sem nenhum título lançado na janela consultada; usado por `main_dashboard.py` junto com `ListarMovimentos` |
 | `financas/extrato` | `ListarExtrato` | `extrato.py` | Saldo da conta corrente (saldo do dia anterior) + lançamentos previstos — fonte usada por `main_caixa.py` |
 
 `PesquisarLancamentos` e `ListarMovimentos` são duas fontes alternativas para o
 mesmo tipo de dado (títulos); só `ListarMovimentos` traz previsão de contrato
 (`PREVISAO_CONTRATO`), por isso os painéis (`contratos.py`, `extrato.py`)
-dependem dele, não do `PesquisarLancamentos`.
+dependem dele, não do `PesquisarLancamentos`. `ListarContratos` não substitui
+`ListarMovimentos` — entra como catálogo mestre pra `contratos.py` saber quais
+contratos existem mesmo antes/sem nenhum título casado, e pra religar títulos
+órfãos ao contrato certo (ver `vinculo` na seção 3.6).
 
 ## 2. Diagrama — da API aos painéis
 
@@ -32,13 +36,15 @@ flowchart LR
         EP4["financas/pesquisartitulos<br/>PesquisarLancamentos"]
         EP5["financas/mf<br/>ListarMovimentos"]
         EP6["financas/extrato<br/>ListarExtrato"]
+        EP7["servicos/contrato<br/>ListarContratos"]
     end
 
     subgraph MOD["Módulos Python (src/)"]
         ENR["enrichment.py<br/>mapas de categoria / conta / cliente"]
         TIT["titulos.py"]
         MOV["movimentos.py"]
-        CTR["contratos.py<br/>agrupa por nCodCtr"]
+        CTRCAD["contratos_cadastro.py<br/>catálogo mestre de contratos"]
+        CTR["contratos.py<br/>agrupa por nCodCtr + reconciliação heurística"]
         EXT["extrato.py<br/>saldo real + previstos"]
         RB["report_builder.py"]
     end
@@ -49,6 +55,7 @@ flowchart LR
     EP4 --> TIT --> RB
     EP5 --> MOV --> RB
     MOV --> CTR
+    EP7 --> CTRCAD --> CTR
     EP6 --> EXT
     ENR --> RB
     ENR --> CTR
@@ -160,8 +167,12 @@ um `cabecTitulo` (dados cadastrais) e um `resumo` (valores).
 |---|---|---|
 | `situacao` (parcela) | `contratos.py` | Um de 6 estados: `Previsto`, `Em aberto`, `Atrasado`, `Pago no prazo`, `Pago com atraso`, `Cancelado` — deriva de `cStatus` + comparação `dDtPagamento` vs `dDtVenc` |
 | `status_contrato` | `contratos.py` | Status agregado do contrato: `Em atraso` (prioridade máxima, mesmo se encerrado/cancelado) → `Ativo` (tem parcela futura) → `Cancelado` (tudo cancelado) → `Encerrado` |
+| `status_cadastro` | `contratos_cadastro.py` | Status do *cadastro* do contrato na Omie (`cCodSit` de `ListarContratos`: `Em elaboração`/`Ativo`/`Suspenso`/`Cancelado`) — convive com `status_contrato` sem um substituir o outro, porque divergem com frequência (contrato "Ativo" no cadastro pode não ter nenhuma parcela em aberto/prevista há meses) |
+| `origem_status` | `contratos.py` | `"parcelas"` quando `status_contrato` foi calculado a partir de parcelas de verdade, `"cadastro"` quando o contrato não tem nenhuma parcela casada e o único sinal disponível é `status_cadastro` |
 | `proxima_parcela` | `contratos.py` | Parcela mais próxima entre as `Previsto`/`Em aberto`/`Atrasado` — inclui atrasadas de propósito, pra não esconder o que mais precisa de atenção |
 | `valor_recorrente` | `contratos.py` | Valor da parcela mais recente não cancelada do contrato |
+| `vinculo` (parcela) | `contratos.py` | Como a parcela chegou ao contrato: `"confirmado"` (`nCodCtr` direto da Omie — fonte primária), `"heuristico"` (título órfão religado por proximidade de natureza/vigência/valor — ver `_match_heuristico`), `"substituto"` (lançamento avulso promovido automaticamente como quitação de uma parcela cancelada, depois de bater valor exato + status pago + categoria + impostos retidos — ver `_substituto_e_confiavel`). Só `"confirmado"` e `"substituto"` entram como referência de valor pra religar outros títulos (`_valor_referencia_contrato`) — `"heuristico"` nunca, pra não deixar a heurística se alimentar da própria incerteza |
+| `titulos_para_revisao` | `contratos.py` | Lista de títulos do mesmo cliente que *parecem* pertencer ao contrato mas não bateram com confiança suficiente pra religar automaticamente (valor/data fora da tolerância, lançamento sem Ordem de Serviço, candidato a substituto fora da janela de dias, etc.) — cada item tem `motivo` (texto explicando por que não confirmou), `situacao`, `pagamento` e `valor`. Nunca conta em `resumo`/`status_contrato`/`valor_recorrente` — é só um sinal pra aprovação manual |
 | `saldo_real_total` | `extrato.py` | Soma do `nSaldoAnterior` das 4 contas operacionais |
 | `lancamentos_previstos` | `extrato.py` | Lançamentos com `cSituacao="Previsto"` e `dDataLancamento >= hoje` |
 | `fluxo_semanal` / `saldo_previsto_acumulado` | `extrato.py` | Lançamentos previstos agrupados por semana, com saldo acumulado (`saldo_real_total` + previstos até aquela semana) |

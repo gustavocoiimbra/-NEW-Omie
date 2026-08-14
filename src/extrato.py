@@ -20,6 +20,14 @@ Achados empíricos contra uma conta real (não documentados pela Omie):
   `dDataLancamento` no passado. Por isso, "previsto a vencer" exige filtrar
   também por `dDataLancamento >= hoje` — só `cSituacao="Previsto"` não basta
   para excluir os títulos em atraso.
+- Uma janela de datas larga (`dPeriodoInicial`/`dPeriodoFinal` cobrindo vários
+  meses) pode devolver `listaMovimentos` **vazio** pra alguma conta corrente
+  específica (achado real: conta "Caixinha", ~94 lançamentos "sumindo" numa
+  janela de ~2 anos) mesmo com a conta e o saldo existindo normalmente —
+  pedindo mês a mês, os lançamentos aparecem. `buscar_extrato` (abaixo) não
+  faz esse chunking automaticamente hoje; ver `sondas/sonda_reconciliacao_bdcontas.py`
+  para a reprodução mês a mês, caso uma conta específica pareça estar
+  perdendo lançamentos numa janela larga.
 """
 from __future__ import annotations
 

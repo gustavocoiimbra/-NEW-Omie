@@ -18,6 +18,17 @@ elas. As diferenças entre os dois endpoints (o que cada um retorna, filtros
 aceitos, casos especiais) estão documentadas como docstring no topo de
 `src/movimentos.py`, não aqui.
 
+Além dos dois relatórios em Excel, o projeto tem **dois painéis** que geram
+JSON em vez de planilha, pensados pra alimentar um dashboard HTML:
+
+| Entry point | Gera | Módulo |
+|---|---|---|
+| `python main_dashboard.py` | `output/contratos.json` — carteira de contratos (parcelas, status, reconciliação heurística de títulos órfãos) | `src/contratos.py` + `src/contratos_cadastro.py` |
+| `python main_caixa.py` | `output/caixa.json` — saldo real das contas operacionais + projeção de fluxo de caixa semanal | `src/extrato.py` |
+
+Ver `GLOSSARIO.md` para o significado de cada campo desses dois JSONs e o
+fluxo completo de onde cada dado vem.
+
 ### Variáveis usadas em cada endpoint
 
 | Endpoint | Módulo | Principais campos usados |
@@ -52,6 +63,15 @@ O relatório é salvo em `output/relatorio_financeiro_<inicio>_a_<fim>.xlsx`
 `--data-inicio`/`--data-fim` são opcionais — rodando sem os dois, o relatório
 traz todos os títulos já lançados na conta, sem filtro de período (pode
 demorar bem mais em contas com histórico extenso).
+
+Os dois painéis JSON têm seus próprios entry points e opções (`--help` em
+cada um pra ver todas):
+
+```bash
+python main_dashboard.py                    # output/contratos.json (histórico completo)
+python main_dashboard.py --ano 2025,2026    # filtra o JSON final por ano (não muda o que é buscado na API)
+python main_caixa.py                        # output/caixa.json
+```
 
 ### Opções
 
@@ -121,9 +141,21 @@ src/
   excel_writer.py                 # geração do .xlsx formatado
   cli.py                            # orquestração / linha de comando (PesquisarLancamentos)
   cli_movimentos.py                   # orquestração / linha de comando (ListarMovimentos)
+  contratos_cadastro.py               # catálogo mestre de contratos via ListarContratos
+  contratos.py                          # carteira de contratos: agrupa por nCodCtr, reconciliação heurística de títulos órfãos
+  extrato.py                              # saldo real + projeção de fluxo de caixa via ListarExtrato
 main.py                            # ponto de entrada (PesquisarLancamentos)
 main_movimentos.py                   # ponto de entrada (ListarMovimentos)
+main_dashboard.py                      # ponto de entrada (painel de contratos, JSON)
+main_caixa.py                            # ponto de entrada (painel de fluxo de caixa, JSON)
 tests/
   sample_titulos.json / test_offline.py             # validação sem rede (PesquisarLancamentos)
   sample_movimentos.json / test_movimentos_offline.py # validação sem rede (ListarMovimentos)
+  test_extrato_offline.py                              # validação sem rede (extrato.py)
+  test_contratos_offline.py                              # validação sem rede (contratos.py)
+sondas/
+  PESQUISA_CONTRATOS_OS.md          # investigação: cadastro de contratos vs. títulos do ListarMovimentos
+  sonda_contratos_os.py               # script exploratório: ListarContratos/ListarOS/ConsultarContaReceber
+  sonda_reconciliacao_bdcontas.py       # script exploratório: reconciliação bdContas nativo vs. API
+  pesquisa.ipynb                          # notebook: reconciliação bdContas nativo vs. API (interativo)
 ```
