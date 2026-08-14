@@ -29,6 +29,14 @@ JSON em vez de planilha, pensados pra alimentar um dashboard HTML:
 Ver `GLOSSARIO.md` para o significado de cada campo desses dois JSONs e o
 fluxo completo de onde cada dado vem.
 
+Tem ainda um terceiro tipo de saída: `main_planilha.py` mantém uma **planilha
+única e estável** (`output/movimentacoes_atualizado.xlsx` por padrão) com o
+snapshot mais atual das movimentações — só a aba de movimentações (mesmo
+layout "Geral"/bdContas dos outros relatórios), sobrescrita por completo a
+cada execução, sem as abas analíticas de `main.py`/`main_movimentos.py`.
+Pensado pra substituir uma reexportação manual da tela da Omie: roda de novo
+quando quiser os dados mais recentes, sempre no mesmo caminho.
+
 ### Variáveis usadas em cada endpoint
 
 | Endpoint | Módulo | Principais campos usados |
@@ -71,6 +79,7 @@ cada um pra ver todas):
 python main_dashboard.py                    # output/contratos.json (histórico completo)
 python main_dashboard.py --ano 2025,2026    # filtra o JSON final por ano (não muda o que é buscado na API)
 python main_caixa.py                        # output/caixa.json
+python main_planilha.py                     # output/movimentacoes_atualizado.xlsx (sobrescrito a cada execução)
 ```
 
 ### Opções
@@ -148,6 +157,7 @@ main.py                            # ponto de entrada (PesquisarLancamentos)
 main_movimentos.py                   # ponto de entrada (ListarMovimentos)
 main_dashboard.py                      # ponto de entrada (painel de contratos, JSON)
 main_caixa.py                            # ponto de entrada (painel de fluxo de caixa, JSON)
+main_planilha.py                           # ponto de entrada (planilha única e estável de movimentações)
 tests/
   sample_titulos.json / test_offline.py             # validação sem rede (PesquisarLancamentos)
   sample_movimentos.json / test_movimentos_offline.py # validação sem rede (ListarMovimentos)

@@ -122,6 +122,19 @@ def _escrever_resumo(ws: Worksheet, resumo: dict[str, Any]) -> None:
     ws.freeze_panes = "A2"
 
 
+def escrever_planilha_movimentacoes(
+    caminho_saida: str, df_geral: pd.DataFrame, nome_aba: str = "Movimentações"
+) -> None:
+    """Grava só a aba de movimentações (mesmo layout/formatação de `_formatar_geral`,
+    usado pela aba "Geral" dos relatórios completos), sem as abas analíticas
+    (Resumo/Por Status/Por Categoria/etc.) — usado por `main_planilha.py` para
+    manter uma planilha única e estável com o snapshot mais atual das
+    movimentações, sobrescrita por completo a cada execução."""
+    with pd.ExcelWriter(caminho_saida, engine="openpyxl") as writer:
+        df_geral.to_excel(writer, sheet_name=nome_aba, index=False)
+        _formatar_geral(writer.book[nome_aba], df_geral)
+
+
 def escrever_relatorio(
     caminho_saida: str,
     resumo: dict[str, Any],
