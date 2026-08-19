@@ -41,7 +41,7 @@ quando quiser os dados mais recentes, sempre no mesmo caminho.
 
 | Endpoint | Módulo | Principais campos usados |
 |---|---|---|
-| `PesquisarLancamentos` / `ListarMovimentos` | `titulos.py` / `movimentos.py` | Título: `nCodTitulo`, `cCodCateg`, `nCodCliente`, `nCodCC`, `cStatus`, `cNatureza`, `nValorTitulo`, `observacao`, datas (`dDtEmissao`/`Venc`/`Pagamento`/`Registro`), retenções (`nValorPIS/COFINS/CSLL/IR/ISS/INSS` + flags `cRetXXX`) · Resumo: `cLiquidado`, `nValPago`, `nValAberto`, `nJuros`, `nMulta`, `nDesconto` |
+| `PesquisarLancamentos` / `ListarMovimentos` | `titulos.py` / `movimentos.py` | Título: `nCodTitulo`, `cCodCateg`, `nCodCliente`, `nCodCC`, `cStatus`, `cNatureza`, `nValorTitulo`, `observacao`, datas (`dDtEmissao`/`Venc`/`Pagamento`/`Registro`), retenções (`nValorPIS/COFINS/CSLL/IR/ISS/INSS` + flags `cRetXXX`) · Resumo: `cLiquidado`, `nValPago`, `nValAberto`, `nJuros`, `nMulta`, `nDesconto` · **Só `PesquisarLancamentos`**: `lancamentos[].cObsLanc` (texto real da baixa bancária — preenche "Observação do Pagto ou Recbto", ~58% dos títulos liquidados) |
 | `ListarCategorias` (`geral/categorias`) | `enrichment.py` | `codigo`, `descricao`, `categoria_superior`, `codigo_dre`, `conta_inativa`, `nao_exibir`, `transferencia`, `totalizadora` |
 | `ListarContasCorrentes` (`geral/contacorrente`) | `enrichment.py` | `nCodCC`, `descricao` |
 | `ListarClientes` (`geral/clientes`) | `enrichment.py` | `codigo_cliente_omie`, `razao_social`, `nome_fantasia`, `cnpj_cpf` |
@@ -168,4 +168,9 @@ sondas/
   sonda_contratos_os.py               # script exploratório: ListarContratos/ListarOS/ConsultarContaReceber
   sonda_reconciliacao_bdcontas.py       # script exploratório: reconciliação bdContas nativo vs. API
   pesquisa.ipynb                          # notebook: reconciliação bdContas nativo vs. API (interativo)
+power_query/
+  README.md                          # instruções de configuração e ordem de criação das consultas
+  fnOmieCall.pq / CategoriaMap.pq / ContaCorrenteMap.pq / ClienteMap.pq
+  Movimentacoes.pq                     # PesquisarLancamentos + rateio + ListarMovimentos (previsão de contrato)
+  SaldoCaixaBase.pq / CaixaSaldoPorConta.pq / CaixaLancamentosPrevistos.pq / CaixaFluxoSemanal.pq
 ```

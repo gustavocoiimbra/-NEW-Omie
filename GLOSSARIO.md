@@ -125,6 +125,14 @@ um `cabecTitulo` (dados cadastrais) e um `resumo` (valores).
 | `nJuros` / `nMulta` / `nDesconto` | resumo | Encargos e desconto aplicados |
 | `nValLiquido` | resumo | Valor líquido (título − desconto + juros + multa) |
 
+**`lancamentos[]` (só em `PesquisarLancamentos`)**: terceiro bloco, irmão de
+`cabecTitulo`/`resumo`, com um item por baixa bancária associada ao título.
+`ListarMovimentos` não tem esse bloco. Campo usado:
+
+| Campo | Bloco | Significado |
+|---|---|---|
+| `cObsLanc` | lancamentos[] | Texto literal que a Omie grava na baixa (ex.: "Pagamento realizado a partir da importação do extrato.") — presente em ~58% dos títulos liquidados desta conta; ausente quando não há baixa associada ou a baixa não tem texto registrado. `report_builder._iter_titulos` lê isso (só quando `lancamentos` está presente no item — nunca sobrescreve um `cObsLancPagto` que um adaptador externo já tenha calculado) e injeta em `cabecTitulo["cObsLancPagto"]`, de onde `montar_geral` preenche a coluna "Observação do Pagto ou Recbto" — antes disso, essa coluna era sempre `""` (uma tentativa anterior de reconstruir o texto via `cOrigem` só bateu ~59% e foi abandonada). Ver `sondas/implementacao_v3_pesquisarlancamentos.ipynb`, seção 8. |
+
 ### 3.3 Só do `ListarMovimentos`
 
 | Campo | Significado |
@@ -146,6 +154,7 @@ um `cabecTitulo` (dados cadastrais) e um `resumo` (valores).
 | `codigo_cliente_omie` | ListarClientes | Código do cliente/fornecedor (chave do mapa) |
 | `razao_social` / `nome_fantasia` | ListarClientes | Nome do cliente/fornecedor (nome fantasia tem prioridade na exibição) |
 | `cnpj_cpf` | ListarClientes | Documento do cliente/fornecedor |
+| `inativo` | ListarClientes | `"S"`/`"N"` — cliente/fornecedor desativado; capturado no mapa mas **não** aplicado como sufixo (diferente de `conta_inativa`): sem título no período para um cliente inativo em nenhuma amostra real disponível, não há como validar se a Omie marca isso na planilha nativa — ver seção 5 de `sondas/implementacao_v2_rateio.ipynb` |
 
 ### 3.5 Extrato / Fluxo de Caixa (`extrato.py`)
 
@@ -153,13 +162,17 @@ um `cabecTitulo` (dados cadastrais) e um `resumo` (valores).
 |---|---|
 | `nSaldoAnterior` | Saldo já conciliado no fechamento do dia **anterior** a `dPeriodoInicial` — consultando com `dPeriodoInicial=hoje`, é exatamente "o saldo real de hoje" |
 | `nSaldoAtual` | Saldo no momento da consulta (não usado no painel) |
-| `listaMovimentos` | Lista de linhas do extrato — inclui marcadores de saldo diário (`cDesCliente="SALDO"`/`"SALDO ANTERIOR"`, sem `cSituacao`) que **não** são lançamentos de verdade |
+| `listaMovimentos` | Lista de linhas do extrato — inclui marcadores de saldo diário (`cDesCliente="SALDO"`/`"SALDO ANTERIOR"`, com quase todos os campos zerados/ausentes) que **não** são lançamentos de verdade |
 | `cSituacao` | `"Conciliado"` (já baixado) ou `"Previsto"` — **atenção**: `"Previsto"` cobre tanto o que ainda vai vencer quanto o que já venceu e segue em aberto (atrasado); por isso o código também filtra por `dDataLancamento >= hoje` pra achar só o "a vencer" de verdade |
 | `dDataLancamento` | Data do lançamento |
 | `nValorDocumento` | Valor do lançamento (sinal: positivo = entrada, negativo = saída) |
 | `cRazCliente` / `cDesCliente` | Cliente/fornecedor do lançamento |
-| `cDesCategoria` | Categoria financeira do lançamento |
+| `cDocCliente` | CNPJ/CPF do cliente/fornecedor do lançamento |
+| `cCodCategoria` / `cDesCategoria` | Categoria financeira do lançamento — em lançamentos de previsão de compra (ver abaixo), vem como uma categoria genérica de movimentação de caixa (`"0.01.02" "Saída de Transferência"`), não a categoria real da despesa |
 | `cNatureza` | `P`/`R` (pagar/receber) |
+| `cSituacao` / `cTipoDocumento` / `cOrigem` | Um lançamento real (não marcador de saldo) pode vir com `cSituacao="Previsto"` + `cTipoDocumento="Pedido de Compra"` + `cOrigem="Previsão de Pedido de Compra"` — é uma previsão/provisionamento interno, não um título formal. Achado numa conta "Caixinha" real: nenhum desses lançamentos aparece em `ListarMovimentos`/`ListarLancCC`, e cerca de 61% deles têm uma contrapartida paga confirmada **em outra conta corrente**, ~1 mês depois — ver investigação completa em `sondas/PESQUISA_RECONCILIACAO_CAIXINHA.md` |
+| `nCodLancamento` | Código do lançamento, específico do extrato — **não** é o mesmo espaço de código de `codigo_lancamento_omie` usado por `financas/contapagar · ConsultarContaPagar` (confirmado: consultar por ele dá "Lançamento não cadastrado") |
+| `cDocumentoFiscal` / `cNumero` / `cParcela` | Documento fiscal e parcela associados ao lançamento, quando existem |
 
 ### 3.6 Campos calculados (não vêm da Omie — são derivados pelo código)
 
@@ -193,3 +206,16 @@ Como os nomes reais das instituições ficam só no `.env` de cada instalação
 expor quais bancos o cliente usa. Contas de caixinha, adiantamento e outras
 contas auxiliares ficam de fora — só entram no cálculo as contas listadas em
 `OMIE_CONTAS_CAIXA`.
+
+## 5. Reconciliação bdContas (nativo) vs. API — achados
+
+Investigação completa comparando a exportação nativa da Omie (`bdContas`) contra o
+relatório gerado via `ListarMovimentos`. Resultado: 97% dos lançamentos "só na planilha
+nativa" têm causa raiz confirmada (não é dado perdido). Detalhe completo, metodologia e
+evidência em `sondas/PESQUISA_RECONCILIACAO_CAIXINHA.md`.
+
+| Causa | O que é |
+|---|---|
+| Rateio de categoria | Um título único na API, dividido em 2-3 linhas por categoria na planilha nativa (impostos com par IRPJ+CSLL/PIS+COFINS/IRRF+CSRF, e relatórios de despesa de viagem com "Despesas com Transporte"+"Lanches e Refeições") — a reconciliação por valor não bate com nenhuma das partes |
+| Previsão de Pedido de Compra (conta "Caixinha") | Lançamento existe só em `ListarExtrato` (`cSituacao="Previsto"`, `cTipoDocumento="Pedido de Compra"`), nunca em `ListarMovimentos`/`ListarLancCC`. ~61% têm um título `PAGO` confirmado depois **em outra conta corrente** (ver seção 3.5) |
+| Sem causa confirmada | Resíduo pequeno (3% dos casos) — título provavelmente alterado/excluído na Omie depois da exportação nativa ser feita; não confirmável sem `nCodTitulo` do lado nativo |

@@ -126,8 +126,8 @@ def build_cliente_map(
     ttl_segundos: float = TTL_PADRAO_SEGUNDOS,
     registros_por_pagina: int = 100,
 ) -> dict[int, dict[str, str]]:
-    """Retorna {codigo_cliente_omie: {razao_social, nome_fantasia, cnpj_cpf}},
-    usando cache em disco quando disponível.
+    """Retorna {codigo_cliente_omie: {razao_social, nome_fantasia, cnpj_cpf,
+    inativo}}, usando cache em disco quando disponível.
 
     Usa ListarClientes (listagem paginada de todo o cadastro) em vez de uma
     chamada ConsultarCliente por código de cliente distinto encontrado nos
@@ -135,14 +135,26 @@ def build_cliente_map(
     período, isso reduz drasticamente o número de chamadas à API — de uma
     por cliente distinto para uma a cada `registros_por_pagina` clientes
     cadastrados no total.
+
+    `inativo` ("S"/"N") vem do cadastro mas não é usado para marcar a coluna
+    "Cliente ou Fornecedor (Nome Fantasia)" (diferente do sufixo "(inativa)"
+    de categoria): não há registro nativo (bdContas) de um cliente inativo
+    com título no período para validar se a Omie marca isso de alguma forma
+    — fica disponível no mapa para quem precisar, sem fabricar um formato
+    não confirmado.
     """
     if usar_cache:
         cache = local_cache.carregar_com_ttl("clientes", ttl_segundos)
         if cache is not None:
-            # Chaves JSON são sempre string; nCodCliente é usado como int no restante do código.
-            mapa_convertido = {int(k): v for k, v in cache.items()}
-            logger.info("Clientes/fornecedores carregados do cache local: %d", len(mapa_convertido))
-            return mapa_convertido
+            if all(isinstance(v, dict) and "inativo" in v for v in cache.values()):
+                # Chaves JSON são sempre string; nCodCliente é usado como int no restante do código.
+                mapa_convertido = {int(k): v for k, v in cache.items()}
+                logger.info("Clientes/fornecedores carregados do cache local: %d", len(mapa_convertido))
+                return mapa_convertido
+            logger.info(
+                "Cache local de clientes está em formato antigo (sem 'inativo') — "
+                "reconsultando a API para atualizá-lo."
+            )
 
     clientes = _listar_paginado(
         client, "geral/clientes", "ListarClientes", "clientes_cadastro", registros_por_pagina
@@ -152,6 +164,7 @@ def build_cliente_map(
             "razao_social": c.get("razao_social", ""),
             "nome_fantasia": c.get("nome_fantasia", ""),
             "cnpj_cpf": c.get("cnpj_cpf", ""),
+            "inativo": c.get("inativo") or "N",
         }
         for c in clientes
         if c.get("codigo_cliente_omie") is not None

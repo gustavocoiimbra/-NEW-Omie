@@ -38,6 +38,31 @@ def _observacao(cabec: dict[str, Any]) -> str:
     return html.unescape(obs.replace("|", " "))
 
 
+def _obs_pagamento(titulo: dict[str, Any]) -> str:
+    """Texto real da baixa bancária (`lancamentos[].cObsLanc`), quando
+    disponível — só existe em títulos vindos de `PesquisarLancamentos`
+    (`titulos.py`, que devolve o objeto bruto com `lancamentos` ao lado de
+    `cabecTitulo`/`resumo`); `ListarMovimentos` (`movimentos.py`) nunca tem
+    essa chave, então isso sempre resulta em "" pra essa fonte — mesmo
+    comportamento de antes (campo em branco), sem quebrar nada.
+
+    Cobertura real confirmada contra uma conta real: ~58% dos títulos
+    liquidados vindos de `PesquisarLancamentos` (ver
+    `sondas/implementacao_v3_pesquisarlancamentos.ipynb`, seção 8) — os
+    outros ficam sem texto (título sem baixa associada, ou baixa sem texto
+    registrado na Omie). Uma tentativa anterior de *reconstruir* esse texto
+    pra qualquer título (a partir de `cOrigem` da baixa) bateu só ~59% e foi
+    abandonada (ver comentário em `_COLUNAS_GERAL`) — usar o texto real
+    quando existe é mais confiável que aproximar, mesmo cobrindo menos casos.
+
+    Um título raramente tem mais de um lançamento de baixa (pagamento
+    parcial em duas transferências, por exemplo) — nesse caso concatena os
+    textos distintos com " | ".
+    """
+    textos = [l.get("cObsLanc") for l in (titulo.get("lancamentos") or []) if l.get("cObsLanc")]
+    return " | ".join(dict.fromkeys(textos))
+
+
 def _iter_titulos(
     titulos_raw: list[dict[str, Any]],
 ) -> Iterator[tuple[dict[str, Any], dict[str, Any]]]:
@@ -48,12 +73,24 @@ def _iter_titulos(
     então o rateio foi removido também aqui para as duas fontes de dados
     produzirem o mesmo resultado para o mesmo título.
 
+    `cabec` sai como uma cópia rasa do `cabecTitulo` original, com
+    `cObsLancPagto` recalculado a partir de `titulo["lancamentos"]` **só quando
+    essa chave existe no item** (formato bruto de `PesquisarLancamentos`) — nunca
+    modifica o dado de entrada. Quando `titulo` não tem `lancamentos` (formato já
+    adaptado de `ListarMovimentos`, ou um `cabecTitulo` que algum adaptador externo
+    já preencheu com esse campo por conta própria — ver
+    `sondas/implementacao_v3_pesquisarlancamentos.ipynb`, seção 5), o que já
+    estiver em `cabecTitulo["cObsLancPagto"]` é preservado em vez de sobrescrito
+    com `""`.
+
     Compartilhado por `montar_linhas` (schema interno) e `montar_geral` (schema do
     modelo padrão da Omie).
     """
     for titulo in titulos_raw:
-        cabec = titulo.get("cabecTitulo", {}) or {}
+        cabec = dict(titulo.get("cabecTitulo") or {})
         resumo = titulo.get("resumo", {}) or {}
+        if "lancamentos" in titulo:
+            cabec["cObsLancPagto"] = _obs_pagamento(titulo)
         yield cabec, resumo
 
 
@@ -247,15 +284,16 @@ _TIPO_LABEL = {"R": "1. Contas a Receber", "P": "2. Contas a Pagar"}
 # ListarCategorias — provavelmente um plano de contas gerencial próprio da conta,
 # sem endpoint público conhecido. Fica em branco para não fabricar dado.
 #
-# "Observação do Pagto ou Recbto" é preenchida quando o título está liquidado:
-# quando NÃO há um lançamento de baixa (CONTA_CORRENTE_PAG/REC) associado, ela
-# duplica a "Observação da Conta" (98% de acerto confirmado); mas a maioria dos
-# títulos liquidados TEM uma baixa associada, e nesse caso o relatório nativo
-# mostra um texto que a Omie gera internamente na conciliação bancária (ex.:
-# "Pagamento realizado a partir da importação do extrato.") que não está
-# disponível de forma confiável em nenhum campo do `ListarMovimentos` — uma
-# tentativa de reconstruir esse texto a partir de `cOrigem` da baixa bateu em
-# apenas ~59% dos casos, então também fica em branco.
+# "Observação do Pagto ou Recbto" é preenchida com o texto real da baixa
+# bancária (`lancamentos[].cObsLanc`, ver `_obs_pagamento`) quando o título vem
+# de `PesquisarLancamentos` (`titulos.py`) — cobertura real de ~58% dos
+# títulos liquidados nesta conta (ver
+# `sondas/implementacao_v3_pesquisarlancamentos.ipynb`, seção 8/10). Fica em
+# branco no restante: título sem baixa associada, baixa sem texto registrado,
+# ou título vindo de `ListarMovimentos` (`movimentos.py`), que nunca expõe
+# essa informação. Uma tentativa anterior de *reconstruir* esse texto pra
+# qualquer título (a partir de `cOrigem` da baixa) bateu só ~59% e foi
+# abandonada — o texto real, quando existe, é mais confiável que aproximar.
 _COLUNAS_GERAL = [
     "x",
     "Tipo",
@@ -332,7 +370,7 @@ def montar_geral(
                 "A Pagar ou Receber": _num(resumo.get("nValAberto")),
                 "Conta Corrente": cc_map.get(cod_cc, cod_cc),
                 "Cliente ou Fornecedor (Nome Fantasia)": cad.get("nome_fantasia") or cad.get("razao_social") or "",
-                "Observação do Pagto ou Recbto": "",
+                "Observação do Pagto ou Recbto": cabec.get("cObsLancPagto") or "",
                 "Data de Pagto": cabec.get("dDtPagamento"),
                 "COFINS Retido": _num_retido(cabec, "nValorCOFINS", "cRetCOFINS"),
                 "CSLL Retido": _num_retido(cabec, "nValorCSLL", "cRetCSLL"),

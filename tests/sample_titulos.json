@@ -53,7 +53,9 @@
       "nValorTitulo": 800.00,
       "observacao": ""
     },
-    "lancamentos": [],
+    "lancamentos": [
+      {"cObsLanc": "Recebimento realizado a partir da importação do extrato.", "nValLanc": 800.00}
+    ],
     "resumo": {
       "cLiquidado": "S",
       "nValPago": 800.00,

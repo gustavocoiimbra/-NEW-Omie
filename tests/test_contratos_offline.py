@@ -68,6 +68,45 @@ def _titulo(
     }
 
 
+def _titulo_pesquisarlancamentos(
+    n_cod_titulo, n_cod_ctr, cod_cliente, status, venc, valor=1000.0,
+    a_cod_categ=None, c_origem="VENR", obs_lanc=None,
+):
+    """Item de contas a pagar/receber no shape BRUTO de `PesquisarLancamentos`
+    (`titulos.buscar_titulos()`) -- `aCodCateg`/`lancamentos` são exclusivos
+    dessa fonte (`ListarMovimentos`/`_titulo` acima nunca tem essas chaves).
+    `cCodCateg` só sai preenchido quando há 1 categoria só (`aCodCateg` com 1
+    entrada) -- `None` com 2+ entradas, igual ao comportamento real
+    confirmado contra a API (ver seção 2 do notebook v3)."""
+    a_cod_categ = a_cod_categ or [{"cCodCateg": "1.01.99", "nPerc": 100.0, "nValor": valor}]
+    pago = status in ("RECEBIDO", "PAGO")
+    cabec = {
+        "nCodTitulo": n_cod_titulo,
+        "nCodCtr": n_cod_ctr,
+        "cNumCtr": f"2026/{n_cod_ctr:05d}" if n_cod_ctr is not None else None,
+        "nCodCliente": cod_cliente,
+        "nCodCC": 1,
+        "cOrigem": c_origem,
+        "cCodCateg": a_cod_categ[0]["cCodCateg"] if len(a_cod_categ) == 1 else None,
+        "aCodCateg": a_cod_categ,
+        "cNatureza": "R",
+        "cStatus": status,
+        "dDtVenc": venc,
+        "dDtEmissao": venc,
+        "dDtPagamento": venc if pago else "",
+        "nValorTitulo": valor,
+    }
+    lancamentos = [{"cObsLanc": obs_lanc, "nValLanc": valor}] if obs_lanc else []
+    resumo = {
+        "cLiquidado": "S" if pago else "N",
+        "nValPago": valor if pago else 0.0,
+        "nValAberto": 0.0 if pago else valor,
+        "nDesconto": 0.0, "nJuros": 0.0, "nMulta": 0.0,
+        "nValLiquido": valor if pago else 0.0,
+    }
+    return {"cabecTitulo": cabec, "lancamentos": lancamentos, "resumo": resumo}
+
+
 def main() -> None:
     titulos_raw = [
         # Contrato 1 (Alfa): 3 parcelas pagas + 1 ATRASADO, sem Previsto/Em
@@ -129,6 +168,7 @@ def main() -> None:
     _testar_pagamento_atrasado()
     _testar_pagamento_atrasado_melhorias()
     _testar_valor_referencia_contrato()
+    _testar_shape_pesquisarlancamentos()
 
     print("\nTodos os testes offline de contratos passaram.")
 
@@ -836,6 +876,96 @@ def _testar_valor_referencia_contrato() -> None:
         "no valor dela mesma -- orfao do mesmo valor nao pode religar por tautologia (salvaguarda de minimo 2)"
     )
     print("OK: contrato com 1 unica parcela confirmada (a propria atrasada) nao colapsa -- cai no fallback nValTotMes, sem religar por tautologia")
+
+
+def _testar_shape_pesquisarlancamentos() -> None:
+    """Item 4 da lista de testes de `nCodCtr` levantada depois da implementação
+    v3 (`sondas/implementacao_v3_pesquisarlancamentos.ipynb`, seção 10):
+    `contratos.montar_contratos` nunca tinha sido testado contra o shape BRUTO
+    de `PesquisarLancamentos` (`aCodCateg`, `lancamentos`, exclusivos dessa
+    fonte — `nCodCtr`/`cOrigem`/`cCodCateg` têm o mesmo nome nas duas fontes).
+
+    Dois cenários:
+
+    1. Uso recomendado — passa o item bruto direto, **sem expandir**
+       `aCodCateg`: funciona sem nenhum adaptador, porque `montar_contratos`
+       nunca lê `aCodCateg` (só `cCodCateg`). Um título com rateio real
+       (`aCodCateg` 2+ entradas, `cCodCateg=None` — confirmado real na seção 2
+       do notebook v3) vira exatamente 1 parcela com o valor **cheio**; só a
+       categoria *exibida* do contrato fica em branco quando esse é o título
+       mais antigo por vencimento — gap cosmético documentado, não um bug de
+       valor.
+    2. Uso arriscado (o que o notebook v3 fazia antes do fix do item 1,
+       seção 10.1) — expande `aCodCateg` em N títulos ANTES de passar pra
+       `montar_contratos`: confirma que isso quebra `total_parcelas`,
+       regressão documentada pra não repetir o erro se alguém reconectar os
+       dois adaptadores no futuro.
+    """
+    cliente_map = {950: {"razao_social": "Cliente Omega Ltda", "nome_fantasia": "Omega", "cnpj_cpf": ""}}
+
+    # Rateado, vencimento mais antigo -> vira o "primeiro_cabec" do contrato,
+    # então sua categoria (None) é a que aparece no campo "categoria" exibido.
+    titulo_rateado = _titulo_pesquisarlancamentos(
+        70001, 40, 950, "RECEBIDO", "10/03/2026", valor=1520.0,
+        a_cod_categ=[
+            {"cCodCateg": "1.01.99", "nPerc": 60.0, "nValor": 912.0},
+            {"cCodCateg": "1.01.02", "nPerc": 40.0, "nValor": 608.0},
+        ],
+        obs_lanc="Recebimento realizado a partir da importação do extrato.",
+    )
+    titulo_sem_rateio = _titulo_pesquisarlancamentos(70002, 40, 950, "RECEBIDO", "10/04/2026", valor=1000.0)
+    titulos_raw = [titulo_rateado, titulo_sem_rateio]
+
+    # 1) Recomendado: sem expandir aCodCateg.
+    contratos_ok = ctr_mod.montar_contratos(titulos_raw, CATEGORIA_MAP, CC_MAP, cliente_map)
+    omega = next(c for c in contratos_ok if c["nCodCtr"] == 40)
+    assert omega["resumo"]["total_parcelas"] == 2, (
+        f"bug: 2 títulos brutos (1 deles com rateio, sem expandir) devem virar exatamente 2 parcelas "
+        f"(obtido {omega['resumo']['total_parcelas']})"
+    )
+    parcela_rateada = next(p for p in omega["parcelas"] if p["nCodTitulo"] == 70001)
+    assert parcela_rateada["valor"] == 1520.0, (
+        f"bug: título com aCodCateg de 2 entradas, sem expandir, deve manter o valor CHEIO do título "
+        f"(obtido {parcela_rateada['valor']})"
+    )
+    assert omega["categoria"] == "", (
+        "esperado: cCodCateg=None no título rateado (real em PesquisarLancamentos), que é o mais antigo "
+        "por vencimento -- categoria exibida do contrato fica em branco; gap cosmético conhecido, não "
+        "afeta valor/contagem de parcelas"
+    )
+    print(
+        "OK: montar_contratos aceita o shape bruto de PesquisarLancamentos direto, sem adaptador -- "
+        "título com rateio real vira 1 parcela com valor cheio (só a categoria exibida fica em branco)"
+    )
+
+    # 2) Regressão documentada: expandir aCodCateg ANTES de montar_contratos quebra.
+    def _expandir_sem_lookup(item):
+        cabec_orig = item["cabecTitulo"]
+        resumo_orig = item["resumo"]
+        a_cod_categ = cabec_orig.get("aCodCateg") or [
+            {"cCodCateg": cabec_orig.get("cCodCateg"), "nPerc": 100, "nValor": cabec_orig.get("nValorTitulo")}
+        ]
+        resultado = []
+        for cat in a_cod_categ:
+            percentual = (cat.get("nPerc") or 100) / 100.0
+            cabec = dict(cabec_orig)
+            cabec["cCodCateg"] = cat["cCodCateg"]
+            cabec["nValorTitulo"] = cat["nValor"]
+            resumo = {k: (v * percentual if isinstance(v, (int, float)) else v) for k, v in resumo_orig.items()}
+            resultado.append({"cabecTitulo": cabec, "resumo": resumo})
+        return resultado
+
+    titulos_expandidos = _expandir_sem_lookup(titulo_rateado) + _expandir_sem_lookup(titulo_sem_rateio)
+    contratos_bug = ctr_mod.montar_contratos(titulos_expandidos, CATEGORIA_MAP, CC_MAP, cliente_map)
+    omega_bug = next(c for c in contratos_bug if c["nCodCtr"] == 40)
+    assert omega_bug["resumo"]["total_parcelas"] == 3, (
+        f"esperado 3 (2 títulos, 1 deles expandido em 2 linhas) -- confirma que expandir aCodCateg ANTES "
+        f"de montar_contratos infla a contagem de parcelas (obtido {omega_bug['resumo']['total_parcelas']})"
+    )
+    print(
+        "OK: (regressão documentada) expandir aCodCateg antes de montar_contratos infla total_parcelas -- "
+        "por isso o adaptador de contratos do notebook v3 (seção 10.1) não expande"
+    )
 
 
 if __name__ == "__main__":

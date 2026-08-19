@@ -175,9 +175,17 @@ def main() -> None:
 
     # Colunas sem fonte de dados na API ficam em branco, mas presentes na estrutura.
     assert set(df_geral["x"]) == {""}
-    assert set(df_geral["Observação do Pagto ou Recbto"]) == {""}
     assert set(df_geral["cod.fcx"]) == {""}
     print("OK: montar_geral (datas reais e colunas sem fonte na API)")
+
+    # "Observação do Pagto ou Recbto": preenchida com o texto real da baixa
+    # (lancamentos[].cObsLanc) só pro título 1002 (iloc[2] após ordenar por
+    # vencimento, NC/Nfe="501") -- único com lancamentos preenchido na
+    # amostra; os demais (sem baixa associada nesta amostra) ficam em branco.
+    assert df_geral.iloc[2]["NC/Nfe"] == "501", "iloc[2] deve ser o título 1002"
+    assert df_geral.iloc[2]["Observação do Pagto ou Recbto"] == "Recebimento realizado a partir da importação do extrato."
+    assert list(df_geral["Observação do Pagto ou Recbto"]) == ["", "", "Recebimento realizado a partir da importação do extrato.", ""]
+    print("OK: montar_geral (Observação do Pagto ou Recbto via lancamentos[].cObsLanc)")
 
     df_pagar = _filtrar(linhas, "Pagar")
     df_receber = _filtrar(linhas, "Receber")
