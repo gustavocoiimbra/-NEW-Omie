@@ -73,6 +73,17 @@ let
         Text.PadStart(Text.From(Date.Month(d)), 2, "0") & "/" &
         Text.From(Date.Year(d)),
 
+    // Acesso seguro a um campo de texto opcional: "Record.FieldOrDefault" só
+    // cobre campo AUSENTE -- um campo presente com valor null explícito no
+    // JSON da Omie (comum pra campo opcional tipo cDocumentoFiscal/cParcela
+    // quando não se aplica àquele lançamento) passaria "null" direto sem essa
+    // checagem extra. Também apara espaço em branco nas pontas.
+    fnTexto = (registro as record, campo as text) as text =>
+        let
+            bruto = Record.FieldOrDefault(registro, campo, null)
+        in
+            if bruto = null then "" else Text.Trim(Text.From(bruto)),
+
     // ---------- Config das contas ----------
     // Só o primeiro ":" separa nome de rótulo -- um rótulo que contenha ":"
     // não quebra o nome da conta.
@@ -144,16 +155,15 @@ let
         in
             List.Transform(filtrados, each
                 let
-                    razCliente = Record.FieldOrDefault(_, "cRazCliente", null),
-                    desCliente = Record.FieldOrDefault(_, "cDesCliente", null),
-                    categoria = Record.FieldOrDefault(_, "cDesCategoria", null)
+                    rc = fnTexto(_, "cRazCliente"),
+                    dc = fnTexto(_, "cDesCliente")
                 in
                     [
                         Conta = rotulo,
-                        Data = Record.FieldOrDefault(_, "dDataLancamento", null),
-                        Natureza = Record.FieldOrDefault(_, "cNatureza", null),
-                        ClienteFornecedor = if razCliente <> null and razCliente <> "" then razCliente else if desCliente <> null and desCliente <> "" then desCliente else "",
-                        Categoria = if categoria <> null then categoria else "",
+                        Data = fnParaData(Record.FieldOrDefault(_, "dDataLancamento", null)),
+                        Natureza = fnTexto(_, "cNatureza"),
+                        ClienteFornecedor = if rc <> "" then rc else dc,
+                        Categoria = fnTexto(_, "cDesCategoria"),
                         Valor = fnNum(Record.FieldOrDefault(_, "nValorDocumento", 0))
                     ]
             ),
@@ -206,21 +216,21 @@ let
                         ]
                     else
                         let
-                            razCliente = Record.FieldOrDefault(_, "cRazCliente", null),
-                            desCliente = Record.FieldOrDefault(_, "cDesCliente", null),
-                            hora = Record.FieldOrDefault(_, "cHoraInclusao", null)
+                            rc = fnTexto(_, "cRazCliente"),
+                            dc = fnTexto(_, "cDesCliente"),
+                            hora = fnTexto(_, "cHoraInclusao")
                         in
                             [
-                                Conta = rotulo, Data = data, Tipo = "Lançamento", Situacao = situacao,
-                                Natureza = Record.FieldOrDefault(_, "cNatureza", ""),
-                                ClienteFornecedor = if razCliente <> null and razCliente <> "" then razCliente else if desCliente <> null and desCliente <> "" then desCliente else "",
-                                Categoria = Record.FieldOrDefault(_, "cDesCategoria", ""),
-                                DocumentoFiscal = Record.FieldOrDefault(_, "cDocumentoFiscal", ""),
-                                Parcela = Record.FieldOrDefault(_, "cParcela", ""),
-                                Origem = Record.FieldOrDefault(_, "cOrigem", ""),
+                                Conta = rotulo, Data = data, Tipo = "Lançamento", Situacao = Text.Trim(situacao),
+                                Natureza = fnTexto(_, "cNatureza"),
+                                ClienteFornecedor = if rc <> "" then rc else dc,
+                                Categoria = fnTexto(_, "cDesCategoria"),
+                                DocumentoFiscal = fnTexto(_, "cDocumentoFiscal"),
+                                Parcela = fnTexto(_, "cParcela"),
+                                Origem = fnTexto(_, "cOrigem"),
                                 Valor = fnNum(Record.FieldOrDefault(_, "nValorDocumento", 0)),
                                 SaldoReal = null, SaldoPrevisto = null,
-                                _Ordem = 0, _Hora = if hora = null then "00:00:00" else hora
+                                _Ordem = 0, _Hora = if hora = "" then "00:00:00" else hora
                             ]
             ),
 
@@ -240,8 +250,13 @@ let
         (estado, semanaInicio) =>
             let
                 semanaFim = Date.AddDays(semanaInicio, 6),
+                // "Data" já é date nativo aqui (fnLancamentosConta converte
+                // com fnParaData na origem) -- NÃO passar de novo por
+                // fnParaData, que espera texto "dd/mm/aaaa": em cima de um
+                // valor date, Text.From usa o formato de data da cultura
+                // corrente (não necessariamente dd/mm/aaaa), quebrando o parse.
                 itens = List.Select(TodosLancamentos, each
-                    let d = fnParaData([Data]) in d <> null and d >= semanaInicio and d <= semanaFim
+                    [Data] <> null and [Data] >= semanaInicio and [Data] <= semanaFim
                 ),
                 entradas = fnSomaSegura(List.Transform(List.Select(itens, each [Valor] >= 0), each [Valor])),
                 saidas = fnSomaSegura(List.Transform(List.Select(itens, each [Valor] < 0), each [Valor])),
@@ -270,9 +285,13 @@ let
     // só preenche um dos dois grupos de coluna) -- sem forçar o tipo aqui, a
     // inferência automática do Table.FromRecords tende a cair pra "any", e o
     // Excel trata a coluna como texto (quebra ordenação/formatação numérica).
+    // Colunas de texto já vêm sem null (fnTexto trata isso), mas ainda assim
+    // tipadas explicitamente pra não depender de inferência.
     ExtratoDiarioTipado = Table.TransformColumnTypes(ExtratoDiarioOrdenado, {
-        {"Data", type date}, {"Valor", type nullable number},
-        {"SaldoReal", type nullable number}, {"SaldoPrevisto", type nullable number}
+        {"Conta", type text}, {"Data", type date}, {"Tipo", type text}, {"Situacao", type text},
+        {"Natureza", type text}, {"ClienteFornecedor", type text}, {"Categoria", type text},
+        {"DocumentoFiscal", type text}, {"Parcela", type text}, {"Origem", type text},
+        {"Valor", type nullable number}, {"SaldoReal", type nullable number}, {"SaldoPrevisto", type nullable number}
     }),
     ExtratoDiario = Table.RenameColumns(
         Table.RemoveColumns(ExtratoDiarioTipado, {"_Ordem", "_Hora"}),
@@ -284,27 +303,42 @@ let
     ),
 
     // ---------- 4 saídas (cada consulta "Caixa*" lê um campo destes) ----------
-    SaldoPorConta = Table.SelectColumns(
-        Table.RenameColumns(ContasComLancamentos, {{"Rotulo", "Conta"}, {"SaldoReal", "Saldo Real"}}),
-        {"Conta", "Saldo Real"}
+    SaldoPorConta = Table.TransformColumnTypes(
+        Table.SelectColumns(
+            Table.RenameColumns(ContasComLancamentos, {{"Rotulo", "Conta"}, {"SaldoReal", "Saldo Real"}}),
+            {"Conta", "Saldo Real"}
+        ),
+        {{"Conta", type text}, {"Saldo Real", type number}}
     ),
 
+    // "Data" já nasce como date (fnLancamentosConta usa fnParaData direto) --
+    // não precisa de coluna auxiliar de ordenação, ordena na própria coluna.
     LancamentosPrevistosBruto = Table.FromRecords(TodosLancamentos, {"Conta", "Data", "Natureza", "ClienteFornecedor", "Categoria", "Valor"}),
-    LancamentosComOrdenacao = Table.AddColumn(LancamentosPrevistosBruto, "DataOrdenacao", each fnParaData([Data]), type nullable date),
-    LancamentosOrdenados = Table.Sort(LancamentosComOrdenacao, {{"DataOrdenacao", Order.Ascending}, {"Conta", Order.Ascending}}),
+    LancamentosOrdenados = Table.Sort(LancamentosPrevistosBruto, {{"Data", Order.Ascending}, {"Conta", Order.Ascending}}),
+    LancamentosTipado = Table.TransformColumnTypes(LancamentosOrdenados, {
+        {"Conta", type text}, {"Data", type nullable date}, {"Natureza", type text},
+        {"ClienteFornecedor", type text}, {"Categoria", type text}, {"Valor", type number}
+    }),
     LancamentosPrevistos = Table.RenameColumns(
-        Table.RemoveColumns(LancamentosOrdenados, {"DataOrdenacao"}),
+        LancamentosTipado,
         {{"ClienteFornecedor", "Cliente ou Fornecedor"}}
     ),
 
     // "Início"/"Fim" ficam como data nativa do Excel -- mais útil pra
     // ordenar/formatar na planilha.
-    FluxoSemanal = Table.RenameColumns(
-        Table.FromRecords(EstadoFluxo[Linhas], {"Inicio", "Fim", "EntradasPrevistas", "SaidasPrevistas", "LiquidoPrevisto", "SaldoPrevistoAcumulado"}),
+    FluxoSemanal = Table.TransformColumnTypes(
+        Table.RenameColumns(
+            Table.FromRecords(EstadoFluxo[Linhas], {"Inicio", "Fim", "EntradasPrevistas", "SaidasPrevistas", "LiquidoPrevisto", "SaldoPrevistoAcumulado"}),
+            {
+                {"Inicio", "Início"}, {"EntradasPrevistas", "Entradas Previstas"},
+                {"SaidasPrevistas", "Saídas Previstas"}, {"LiquidoPrevisto", "Líquido Previsto"},
+                {"SaldoPrevistoAcumulado", "Saldo Previsto Acumulado"}
+            }
+        ),
         {
-            {"Inicio", "Início"}, {"EntradasPrevistas", "Entradas Previstas"},
-            {"SaidasPrevistas", "Saídas Previstas"}, {"LiquidoPrevisto", "Líquido Previsto"},
-            {"SaldoPrevistoAcumulado", "Saldo Previsto Acumulado"}
+            {"Início", type date}, {"Fim", type date}, {"Entradas Previstas", type number},
+            {"Saídas Previstas", type number}, {"Líquido Previsto", type number},
+            {"Saldo Previsto Acumulado", type number}
         }
     ),
 
