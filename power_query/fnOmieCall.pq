@@ -18,13 +18,17 @@ let
                 app_secret = OmieAppSecret,
                 param = { param }
             ],
-            Resposta = Web.Contents(
+            // "if _Espera = 0" força este passo a depender de "_Espera" -- sem
+            // isso o M não teria motivo pra avaliar a espera (variável não
+            // referenciada por nada no "in" final é só descartada, o
+            // Function.InvokeAfter nunca dispara). "_Espera" sempre é 0.
+            Resposta = if _Espera = 0 then Web.Contents(
                 Url,
                 [
                     Headers = [#"Content-Type" = "application/json"],
                     Content = Json.FromValue(Corpo)
                 ]
-            ),
+            ) else error "unreachable",
             Json = Json.Document(Resposta)
         in
             Json

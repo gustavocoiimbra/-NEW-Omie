@@ -25,6 +25,7 @@ arquivo é o nome exato que a consulta deve ter no Excel.
 | `CaixaSaldoPorConta.pq` | Saldo real por conta (lê `SaldoCaixaBase`) | **Sim** |
 | `CaixaLancamentosPrevistos.pq` | Lançamentos previstos a vencer (lê `SaldoCaixaBase`) | **Sim** |
 | `CaixaFluxoSemanal.pq` | Fluxo de caixa projetado por semana (lê `SaldoCaixaBase`) | **Sim** |
+| `CaixaExtratoDiario.pq` | Extrato diário (lançamentos + saldo de fechamento por dia, lê `SaldoCaixaBase`) | **Sim** |
 
 ## Como criar cada consulta no Excel
 
@@ -55,7 +56,8 @@ Quais consultas carregar como aba (coluna "Vira aba na planilha?" na tabela
 acima):
 
 - **`Movimentacoes`, `CaixaSaldoPorConta`, `CaixaLancamentosPrevistos`,
-  `CaixaFluxoSemanal`** -- são o resultado final, sempre carregar como aba.
+  `CaixaFluxoSemanal`, `CaixaExtratoDiario`** -- são o resultado final, sempre
+  carregar como aba.
 - **`CategoriaMap`, `ContaCorrenteMap`, `ClienteMap`** -- opcional. Alimentam
   `Movimentacoes` por referência de nome (não precisam de aba própria pra
   isso funcionar), mas carregar como aba ajuda a conferir o cadastro
@@ -64,7 +66,7 @@ acima):
   (desmarcar) -- ela continua disponível pras outras consultas, só não vira
   aba.
 - **`SaldoCaixaBase`** -- nunca carregar como aba: o resultado dela é um
-  registro único com as 3 saídas de caixa dentro (não uma tabela), e
+  registro único com as 4 saídas de caixa dentro (não uma tabela), e
   carregar geraria um erro ou uma aba sem utilidade. Confirme que
   "Habilitar Carregamento" está desmarcado nela (botão direito na consulta,
   painel Consultas).
@@ -89,13 +91,15 @@ uma vez, refazendo as chamadas à API.
 3. `SaldoCaixaBase` -- depende só de `fnOmieCall` e `ContaCorrenteMap` (NÃO
    de `Movimentacoes`). Antes de usar, abra o Editor Avançado e configure
    `ContasCaixaTexto` (formato: `nome exato no cadastro Omie:rótulo,nome
-   exato no cadastro:rótulo,...` -- o rótulo é opcional). Depois de criar,
-   **desligue "Habilitar Carregamento"** (botão direito na consulta, painel
-   Consultas) -- ela é só uma etapa intermediária, não uma tabela pra
-   planilha.
-4. `CaixaSaldoPorConta`, `CaixaLancamentosPrevistos`, `CaixaFluxoSemanal` --
-   dependem só de `SaldoCaixaBase`, crie as 3 por último, em qualquer ordem
-   entre si (essas sim, com carregamento ligado).
+   exato no cadastro:rótulo,...` -- o rótulo é opcional), `DiasPrevisao`
+   (janela pra frente, usada por `CaixaLancamentosPrevistos`/
+   `CaixaFluxoSemanal`) e `DiasHistorico` (janela pra trás, usada só por
+   `CaixaExtratoDiario`). Depois de criar, **desligue "Habilitar
+   Carregamento"** (botão direito na consulta, painel Consultas) -- ela é só
+   uma etapa intermediária, não uma tabela pra planilha.
+4. `CaixaSaldoPorConta`, `CaixaLancamentosPrevistos`, `CaixaFluxoSemanal`,
+   `CaixaExtratoDiario` -- dependem só de `SaldoCaixaBase`, crie as 4 por
+   último, em qualquer ordem entre si (essas sim, com carregamento ligado).
 
 ## Endpoints usados
 
@@ -153,3 +157,35 @@ for necessário adicionar.
 (`aCodCateg[]` com mais de uma entrada), a tabela final tem uma linha por
 categoria -- cada linha usa `cCodCateg`/`nValorTitulo`/retenções da sua
 própria entrada em `aCodCateg[]`, não do título inteiro.
+
+## Dicionário de campos -- aba "CaixaExtratoDiario"
+
+Uma linha por lançamento do dia (`Tipo de Linha = "Lançamento"`) e, ao final
+de cada data, uma linha de fechamento (`Tipo de Linha = "Saldo do Dia"`) --
+nessa linha só as colunas de saldo vêm preenchidas, o resto fica em branco.
+Cobre os últimos `DiasHistorico` dias (configurado em `SaldoCaixaBase`, olha
+só pra trás a partir de hoje). Todos os campos vêm direto de `ListarExtrato`
+(sem enriquecimento via `CategoriaMap`/`ClienteMap` -- o próprio endpoint já
+devolve categoria e cliente como texto).
+
+| Coluna | Campo da API | Observação |
+|---|---|---|
+| `Conta` | -- | Rótulo configurado em `ContasCaixaTexto` (`SaldoCaixaBase`) |
+| `Data` | `dDataLancamento` | Data |
+| `Tipo de Linha` | -- (derivado) | `"Lançamento"` ou `"Saldo do Dia"` |
+| `Situação` | `cSituacao` | `"Conciliado"` (já baixado no banco) ou `"Previsto"` (a vencer ou vencido em aberto); em branco na linha de saldo |
+| `Natureza` | `cNatureza` | `R`/`P`; em branco na linha de saldo |
+| `Cliente ou Fornecedor` | `cRazCliente` (ou `cDesCliente` se vazio) | Em branco na linha de saldo |
+| `Categoria` | `cDesCategoria` | Já vem como texto (não é código) |
+| `Documento Fiscal` | `cDocumentoFiscal` | |
+| `Parcela` | `cParcela` | Ex.: `"005/010"` |
+| `Origem` | `cOrigem` | Ex.: `"Conta Recebida"`, `"Conta Paga"`, `"Conta a Pagar"` |
+| `Valor` | `nValorDocumento` | Já vem com sinal (negativo = saída); em branco na linha de saldo |
+| `Saldo Real (Conciliado)` | `nSaldo` | Saldo acumulado só com o que já foi baixado no banco; preenchido só na linha de saldo |
+| `Saldo Previsto (c/ Pendentes)` | `nSaldoPrev` | Saldo acumulado incluindo `Previsto`; preenchido só na linha de saldo |
+
+**Marcador "SALDO ANTERIOR":** o `ListarExtrato` sempre inclui um marcador de
+saldo pro dia imediatamente ANTES de `dPeriodoInicial` (saldo de arrasto).
+Esse marcador é descartado por estar fora da janela de `DiasHistorico`
+pedida -- `SaldoReal` (aba `CaixaSaldoPorConta`) já cobre o saldo de hoje por
+outro caminho.

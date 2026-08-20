@@ -5,3 +5,4 @@ let
     Resultado = SaldoCaixaBase[LancamentosPrevistos]
 in
     Resultado
+    

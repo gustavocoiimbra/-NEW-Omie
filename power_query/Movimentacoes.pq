@@ -137,9 +137,19 @@ let
         in
             List.Combine(List.Transform(Paginas, each Record.FieldOrDefault(_, "titulosEncontrados", {}))),
 
-    TitulosPagar = fnBuscarTitulosPorNatureza("P"),
-    TitulosReceber = fnBuscarTitulosPorNatureza("R"),
-    TodosTitulos = List.Combine({TitulosPagar, TitulosReceber}),
+    // "P" e "R" são buscas de "fnBuscarTitulosPorNatureza" para o MESMO método
+    // (PesquisarLancamentos), que a Omie limita por IP+app_key+método (4
+    // req/s -- ver fnOmieCall.pq). Ligar as duas como dois passos
+    // independentes do "let" não garante ordem: o M pode avaliar bindings sem
+    // dependência entre si em paralelo, o que somaria as duas paginações
+    // contra o mesmo limite ao mesmo tempo. List.Accumulate força R a só
+    // começar depois que P terminar (cada passo depende do acumulado do
+    // anterior), serializando as duas buscas.
+    TodosTitulos = List.Accumulate(
+        {"P", "R"},
+        {},
+        (estado, natureza) => estado & fnBuscarTitulosPorNatureza(natureza)
+    ),
 
     // ---------- Expande rateio (aCodCateg) -- 1 item por categoria do título ----------
     // Cada título de PesquisarLancamentos pode estar dividido entre várias

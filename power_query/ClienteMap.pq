@@ -11,7 +11,10 @@ let
                 app_secret = OmieAppSecret,
                 param = { [ pagina = pagina, registros_por_pagina = 100 ] }
             ],
-            Resposta = Web.Contents(Url, [Headers = [#"Content-Type" = "application/json"], Content = Json.FromValue(Corpo)]),
+            // "if _Espera = 0" força este passo a depender de "_Espera" -- sem
+            // isso o M não teria motivo pra avaliar a espera (ver
+            // fnOmieCall.pq para o detalhe). "_Espera" sempre é 0.
+            Resposta = if _Espera = 0 then Web.Contents(Url, [Headers = [#"Content-Type" = "application/json"], Content = Json.FromValue(Corpo)]) else error "unreachable",
             Json = Json.Document(Resposta)
         in
             Json,

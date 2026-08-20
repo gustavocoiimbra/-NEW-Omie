@@ -1,11 +1,12 @@
-// financas/extrato · ListarExtrato, uma chamada por conta corrente
-// configurada. NÃO carregue esta consulta numa planilha (desligue "Habilitar
-// Carregamento", botão direito na consulta no painel Consultas) -- ela
-// devolve um record com as 3 partes do resultado; "CaixaSaldoPorConta",
-// "CaixaLancamentosPrevistos" e "CaixaFluxoSemanal" referenciam cada uma o
-// campo delas, assim as chamadas à API rodam só 1 vez por atualização, não 1
-// vez por consulta de saída. Depende de "fnOmieCall" e "ContaCorrenteMap" --
-// crie essas duas antes.
+// financas/extrato · ListarExtrato, DUAS chamadas por conta corrente
+// configurada (uma janela pra frente, outra pra trás -- ver "DiasPrevisao"/
+// "DiasHistorico" abaixo). NÃO carregue esta consulta numa planilha (desligue
+// "Habilitar Carregamento", botão direito na consulta no painel Consultas) --
+// ela devolve um record com as 4 partes do resultado; "CaixaSaldoPorConta",
+// "CaixaLancamentosPrevistos", "CaixaFluxoSemanal" e "CaixaExtratoDiario"
+// referenciam cada uma o campo delas, assim as chamadas à API rodam só 1 vez
+// por atualização, não 1 vez por consulta de saída. Depende de "fnOmieCall" e
+// "ContaCorrenteMap" -- crie essas duas antes.
 //
 // Antes de usar, configure "ContasCaixaTexto" abaixo (editável direto no
 // Editor Avançado).
@@ -14,14 +15,28 @@
 // - "nSaldoAnterior" da resposta é o saldo já conciliado do fechamento do dia
 //   ANTERIOR a dPeriodoInicial -- consultando com dPeriodoInicial=hoje, isso
 //   já é "o saldo real de hoje";
-// - "listaMovimentos" tem linhas que não são lançamentos de verdade
-//   (marcadores de saldo diário) -- filtramos só cSituacao="Previsto";
+// - "listaMovimentos" mistura 3 tipos de linha, distinguíveis por
+//   "cSituacao": "Conciliado" (lançamento já baixado no banco -- de verdade),
+//   "Previsto" (a vencer OU já vencido em aberto -- não dá pra saber qual só
+//   pelo cSituacao, precisa checar a data) e ausente/null (marcador de saldo
+//   do dia, "cDesCliente"="SALDO" -- ou "SALDO ANTERIOR" no primeiro, que é
+//   sempre o dia ANTES de dPeriodoInicial). Confirmado por sonda: existe
+//   exatamente 1 marcador de saldo por dia do período, mesmo em dias sem
+//   nenhum lançamento, sempre depois dos lançamentos do dia na ordem da
+//   resposta;
+// - cada linha (lançamento OU marcador) já traz o saldo acumulado até ali em
+//   "nSaldo" (só "Conciliado" -- "Previsto" não avança esse campo) e
+//   "nSaldoPrev" ("Conciliado" + "Previsto" -- inclui pendente). É esse saldo
+//   por linha que "CaixaExtratoDiario" usa como "saldo do dia", não um
+//   cálculo manual;
 // - cSituacao="Previsto" também cobre títulos JÁ vencidos e em aberto (não só
-//   "a vencer") -- por isso filtramos também por dDataLancamento >= hoje;
+//   "a vencer") -- por isso "LancamentosPrevistos" (a vencer) filtra também
+//   por dDataLancamento >= hoje; "ExtratoDiario" (histórico) não precisa
+//   dessa checagem porque olha só pra trás;
 // - uma janela de datas larga pode devolver listaMovimentos vazio pra alguma
 //   conta específica mesmo com lançamentos existindo -- isso não é tratado
 //   automaticamente aqui; se uma conta parecer estar perdendo lançamentos
-//   numa janela larga, reduza DiasPrevisao.
+//   numa janela larga, reduza DiasPrevisao/DiasHistorico.
 let
     // ---- Configuração (edite aqui) ----
     // Lista separada por vírgula de contas correntes a considerar no saldo
@@ -30,8 +45,10 @@ let
     // cadastro. Precisa bater EXATAMENTE com "ContaCorrente_Descricao" de
     // ContaCorrenteMap.
     ContasCaixaTexto = "",
-    // Quantos dias à frente projetar.
+    // Quantos dias à frente projetar (CaixaLancamentosPrevistos/CaixaFluxoSemanal).
     DiasPrevisao = 90,
+    // Quantos dias pra trás trazer no extrato diário (CaixaExtratoDiario).
+    DiasHistorico = 30,
 
     // ---------- Funções auxiliares (mesma lógica das funções homônimas em "Movimentacoes", repetida aqui porque cada consulta é independente) ----------
     fnNum = (valor as any) as number =>
@@ -98,13 +115,20 @@ let
                     achado{0}[nCodCC]
     ),
 
-    // ---------- Busca do extrato (1 chamada por conta, sem paginação) ----------
+    // ---------- Busca do extrato (2 chamadas por conta, sem paginação) ----------
     Hoje = DateTime.Date(DateTime.LocalNow()),
     HojeTexto = fnDataTexto(Hoje),
     FimTexto = fnDataTexto(Date.AddDays(Hoje, DiasPrevisao)),
+    HistoricoInicioData = Date.AddDays(Hoje, -DiasHistorico),
+    HistoricoInicioTexto = fnDataTexto(HistoricoInicioData),
 
-    fnBuscarExtrato = (nCodCC as number) as record =>
-        fnOmieCall("financas/extrato", "ListarExtrato", [ nCodCC = nCodCC, dPeriodoInicial = HojeTexto, dPeriodoFinal = FimTexto ]),
+    fnBuscarExtratoPeriodo = (nCodCC as number, inicio as text, fim as text) as record =>
+        fnOmieCall("financas/extrato", "ListarExtrato", [ nCodCC = nCodCC, dPeriodoInicial = inicio, dPeriodoFinal = fim ]),
+
+    // Janela pra frente (hoje -> hoje+DiasPrevisao) -- usada por SaldoReal/Lancamentos/FluxoSemanal.
+    fnBuscarExtrato = (nCodCC as number) as record => fnBuscarExtratoPeriodo(nCodCC, HojeTexto, FimTexto),
+    // Janela pra trás (hoje-DiasHistorico -> hoje) -- usada só por ExtratoDiario.
+    fnBuscarExtratoHistorico = (nCodCC as number) as record => fnBuscarExtratoPeriodo(nCodCC, HistoricoInicioTexto, HojeTexto),
 
     ContasComExtrato = Table.AddColumn(ContasResolvidas, "Extrato", each fnBuscarExtrato([nCodCC])),
     ContasComSaldo = Table.AddColumn(ContasComExtrato, "SaldoReal", each fnNum(Record.FieldOrDefault([Extrato], "nSaldoAnterior", 0))),
@@ -139,6 +163,70 @@ let
     SaldoRealTotal = List.Sum(ContasComLancamentos[SaldoReal]),
     TodosLancamentos = List.Combine(ContasComLancamentos[Lancamentos]),
 
+    // ---------- Extrato diário (lançamentos do dia + saldo de fechamento do dia) ----------
+    // Encadeada a partir de "ContasComLancamentos" (não de "ContasResolvidas"
+    // direto) de propósito: assim a busca histórica só começa depois que a
+    // busca pra frente (linha acima) já terminou pra TODAS as contas, em vez
+    // de virar um segundo binding independente que o M poderia avaliar em
+    // paralelo com o primeiro -- as duas batem no mesmo método
+    // (financas/extrato · ListarExtrato), sujeito ao mesmo limite de taxa por
+    // IP+app_key+método.
+    ContasComExtratoHistorico = Table.AddColumn(ContasComLancamentos, "ExtratoHistorico", each fnBuscarExtratoHistorico([nCodCC])),
+
+    // Cada item de "listaMovimentos" vira uma linha de "Lançamento" (cSituacao
+    // "Conciliado" ou "Previsto") ou uma linha de "Saldo do Dia" (cSituacao
+    // ausente/null -- o marcador diário nativo do endpoint, ver comentário no
+    // topo do arquivo). "_Ordem"/"_Hora" são só pra ordenação (removidas no
+    // final) -- garantem lançamentos antes do saldo do dia mesmo se a ordem
+    // bruta da API não for 100% confiável.
+    fnLinhasExtratoDiario = (extrato as record, rotulo as text) as list =>
+        let
+            movs = Record.FieldOrDefault(extrato, "listaMovimentos", {}),
+            // Descarta o marcador "SALDO ANTERIOR" (sempre o dia ANTES de
+            // dPeriodoInicial) -- está fora da janela pedida, é só o saldo de
+            // arrasto que "SaldoReal"/"nSaldoAnterior" já cobre em outro lugar.
+            dentroDaJanela = List.Select(movs, each
+                let d = fnParaData(Record.FieldOrDefault(_, "dDataLancamento", null))
+                in d <> null and d >= HistoricoInicioData
+            )
+        in
+            List.Transform(dentroDaJanela, each
+                let
+                    situacao = Record.FieldOrDefault(_, "cSituacao", null),
+                    data = fnParaData(Record.FieldOrDefault(_, "dDataLancamento", null))
+                in
+                    if situacao = null then
+                        [
+                            Conta = rotulo, Data = data, Tipo = "Saldo do Dia", Situacao = "",
+                            Natureza = "", ClienteFornecedor = "", Categoria = "",
+                            DocumentoFiscal = "", Parcela = "", Origem = "", Valor = null,
+                            SaldoReal = fnNum(Record.FieldOrDefault(_, "nSaldo", 0)),
+                            SaldoPrevisto = fnNum(Record.FieldOrDefault(_, "nSaldoPrev", 0)),
+                            _Ordem = 1, _Hora = "99:99:99"
+                        ]
+                    else
+                        let
+                            razCliente = Record.FieldOrDefault(_, "cRazCliente", null),
+                            desCliente = Record.FieldOrDefault(_, "cDesCliente", null),
+                            hora = Record.FieldOrDefault(_, "cHoraInclusao", null)
+                        in
+                            [
+                                Conta = rotulo, Data = data, Tipo = "Lançamento", Situacao = situacao,
+                                Natureza = Record.FieldOrDefault(_, "cNatureza", ""),
+                                ClienteFornecedor = if razCliente <> null and razCliente <> "" then razCliente else if desCliente <> null and desCliente <> "" then desCliente else "",
+                                Categoria = Record.FieldOrDefault(_, "cDesCategoria", ""),
+                                DocumentoFiscal = Record.FieldOrDefault(_, "cDocumentoFiscal", ""),
+                                Parcela = Record.FieldOrDefault(_, "cParcela", ""),
+                                Origem = Record.FieldOrDefault(_, "cOrigem", ""),
+                                Valor = fnNum(Record.FieldOrDefault(_, "nValorDocumento", 0)),
+                                SaldoReal = null, SaldoPrevisto = null,
+                                _Ordem = 0, _Hora = if hora = null then "00:00:00" else hora
+                            ]
+            ),
+
+    ContasComExtratoDiario = Table.AddColumn(ContasComExtratoHistorico, "LinhasExtratoDiario", each fnLinhasExtratoDiario([ExtratoHistorico], [Rotulo])),
+    TodasLinhasExtratoDiario = List.Combine(ContasComExtratoDiario[LinhasExtratoDiario]),
+
     // ---------- Fluxo semanal projetado (segunda a domingo, saldo acumulado) ----------
     // Inclui semanas sem nenhum lançamento -- o saldo acumulado não pode
     // "pular" períodos.
@@ -171,7 +259,31 @@ let
                 [ Acumulado = novoAcumulado, Linhas = estado[Linhas] & { linha } ]
     ),
 
-    // ---------- 3 saídas (cada consulta "Caixa*" lê um campo destes) ----------
+    ExtratoDiarioBruto = Table.FromRecords(TodasLinhasExtratoDiario, {
+        "Conta", "Data", "Tipo", "Situacao", "Natureza", "ClienteFornecedor", "Categoria",
+        "DocumentoFiscal", "Parcela", "Origem", "Valor", "SaldoReal", "SaldoPrevisto", "_Ordem", "_Hora"
+    }),
+    ExtratoDiarioOrdenado = Table.Sort(ExtratoDiarioBruto, {
+        {"Conta", Order.Ascending}, {"Data", Order.Ascending}, {"_Ordem", Order.Ascending}, {"_Hora", Order.Ascending}
+    }),
+    // "Valor"/"SaldoReal"/"SaldoPrevisto" misturam number e null (cada linha
+    // só preenche um dos dois grupos de coluna) -- sem forçar o tipo aqui, a
+    // inferência automática do Table.FromRecords tende a cair pra "any", e o
+    // Excel trata a coluna como texto (quebra ordenação/formatação numérica).
+    ExtratoDiarioTipado = Table.TransformColumnTypes(ExtratoDiarioOrdenado, {
+        {"Data", type date}, {"Valor", type nullable number},
+        {"SaldoReal", type nullable number}, {"SaldoPrevisto", type nullable number}
+    }),
+    ExtratoDiario = Table.RenameColumns(
+        Table.RemoveColumns(ExtratoDiarioTipado, {"_Ordem", "_Hora"}),
+        {
+            {"Tipo", "Tipo de Linha"}, {"Situacao", "Situação"}, {"ClienteFornecedor", "Cliente ou Fornecedor"},
+            {"DocumentoFiscal", "Documento Fiscal"}, {"SaldoReal", "Saldo Real (Conciliado)"},
+            {"SaldoPrevisto", "Saldo Previsto (c/ Pendentes)"}
+        }
+    ),
+
+    // ---------- 4 saídas (cada consulta "Caixa*" lê um campo destes) ----------
     SaldoPorConta = Table.SelectColumns(
         Table.RenameColumns(ContasComLancamentos, {{"Rotulo", "Conta"}, {"SaldoReal", "Saldo Real"}}),
         {"Conta", "Saldo Real"}
@@ -196,6 +308,6 @@ let
         }
     ),
 
-    Resultado = [ SaldoPorConta = SaldoPorConta, LancamentosPrevistos = LancamentosPrevistos, FluxoSemanal = FluxoSemanal ]
+    Resultado = [ SaldoPorConta = SaldoPorConta, LancamentosPrevistos = LancamentosPrevistos, FluxoSemanal = FluxoSemanal, ExtratoDiario = ExtratoDiario ]
 in
     Resultado
